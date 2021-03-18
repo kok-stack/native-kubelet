@@ -8,7 +8,6 @@ import (
 	"github.com/kok-stack/native-kubelet/log"
 	"github.com/kok-stack/native-kubelet/node/api"
 	"github.com/kok-stack/native-kubelet/trace"
-	"github.com/pkg/errors"
 	"github.com/prologic/bitcask"
 	"io"
 	"io/ioutil"
@@ -18,15 +17,8 @@ import (
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
-	corev1listers "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/metrics/pkg/client/clientset/versioned"
-	"os"
 	"path/filepath"
 	"time"
 )
@@ -50,11 +42,11 @@ type Provider struct {
 	startTime  time.Time
 	config     *config
 
-	podHandler     *PodEventHandler
-	nodeHandler    *NodeEventHandler
-	imageManager   *ImageManager
-	db             *bitcask.Bitcask
-	processManager *ProcessManager
+	podHandler       *PodEventHandler
+	nodeHandler      *NodeEventHandler
+	imageManager     *ImageManager
+	db               *bitcask.Bitcask
+	containerManager *ContainerManager
 }
 
 func (p *Provider) NotifyPods(ctx context.Context, f func(*v1.Pod)) {
@@ -95,7 +87,7 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 
 	//trimPod(pod, p.initConfig.NodeName)
 	//TODO:放到本地存储中
-	p.processManager.create(ctx, pod)
+	p.containerManager.create(ctx, pod)
 
 	_, err := p.downClientSet.CoreV1().Pods(pod.GetNamespace()).Create(ctx, pod, v12.CreateOptions{})
 	if err != nil {
@@ -317,7 +309,7 @@ func (p *Provider) start(ctx context.Context) error {
 	}()
 	p.db = db
 	p.imageManager = NewImageManager(filepath.Join(p.config.WorkDir, ImagePath), db)
-	p.processManager = newProcessManager(p.imageManager)
+	p.containerManager = newContainerManager(p.imageManager)
 	return nil
 }
 

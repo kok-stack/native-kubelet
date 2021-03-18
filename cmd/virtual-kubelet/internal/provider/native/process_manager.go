@@ -2,91 +2,87 @@ package native
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/flytam/filenamify"
+	"github.com/prologic/bitcask"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/kubernetes/pkg/kubelet/dockershim"
-	"time"
+	"path/filepath"
 )
 
 type ProcessManager struct {
-	imageManager     *ImageManager
-	containerManager *ContainerManager
+	workdir   string
+	processDb *bitcask.Bitcask
 }
 
-func (m *ProcessManager) create(ctx context.Context, pod *corev1.Pod) error {
-	//拉取image,解压,运行
-	images := getImages(pod)
-	if err := pullImages(ctx, m.imageManager, images); err != nil {
-		return err
-	}
-	if err := runInitContainers(ctx, m.imageManager, m.containerManager, pod); err != nil {
-		return err
-	}
-	//运行
-	if err := runContainers(ctx, m.imageManager, m.containerManager, pod); err != nil {
-		return err
-	}
+func NewProcessManager(workdir string, processDb *bitcask.Bitcask) *ProcessManager {
+	return &ProcessManager{workdir: workdir, processDb: processDb}
 }
 
-//普通容器,并发运行
-func runContainers(ctx context.Context, im *ImageManager, cm *ContainerManager, pod *corev1.Pod) error {
-	for i, c := range pod.Spec.Containers {
-		if err := cm.createContainer(ctx, im, c, pod); err != nil {
-			return err
-		}
+type KubeletProcess struct {
+	workdir   string
+	podName   string
+	namespace string
+}
+
+func (p *KubeletProcess) Run(ctx context.Context) error {
+	//command := exec.Command()
+}
+
+func (m *ProcessManager) createProcess(ctx context.Context, im *ImageManager, c corev1.Container, pod *corev1.Pod) (*KubeletProcess, error) {
+	//获取解压的地址
+	workdir, err := getProcessWorkDir(m.workdir, pod, c)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	//解压
+	err = im.decompressionImage(ctx, c.Image, workdir)
+	if err != nil {
+		return nil, err
+	}
+	//配置运行process
+	return NewProcess(pod, c, workdir), nil
 }
 
 /*
-1.创建container
-2.解压到container
-3.run container
+1.创建process
+2.解压到process
+3.run process
 */
-//init 容器按照顺序运行
-func runInitContainers(ctx context.Context, im *ImageManager, cm *ContainerManager, pod *corev1.Pod) error {
-	for i, c := range pod.Spec.InitContainers {
-		if err := cm.createContainer(ctx, im, c, pod); err != nil {
-			return err
-		}
+func (m *ProcessManager) createPersistenceProcess(ctx context.Context, im *ImageManager, c corev1.Container, pod *corev1.Pod) (*KubeletProcess, error) {
+	proc, err := m.createProcess(ctx, im, c, pod)
+	if err != nil {
+		return proc, nil
 	}
-	return nil
+	marshal, err := json.Marshal(proc)
+	if err != nil {
+		return nil, err
+	}
+	err = m.processDb.Put(getProcessKey(proc), marshal)
+	if err != nil {
+		return nil, err
+	}
+	return proc, nil
 }
 
-func pullImages(ctx context.Context, manager *ImageManager, images []string) error {
-	//TODO:支持docker镜像ImagePullSecrets
-	for _, image := range images {
-		if err := manager.PullImage(ctx, PullImageOpts{
-			SrcImage:                    dockerImageName(image),
-			DockerAuthConfig:            nil,
-			DockerBearerRegistryToken:   "",
-			DockerRegistryUserAgent:     "",
-			DockerInsecureSkipTLSVerify: 0,
-			Timeout:                     time.Hour,
-			RetryCount:                  10,
-		}); err != nil {
-			return err
-		}
+func NewProcess(pod *corev1.Pod, c corev1.Container, workdir string) *KubeletProcess {
+	//TODO:运行命令，环境变量等参数设置
+	return &KubeletProcess{
+		workdir:   workdir,
+		podName:   pod.Name,
+		namespace: pod.Namespace,
 	}
-	return nil
 }
 
-func dockerImageName(image string) string {
-	return dockershim.DockerImageIDPrefix + image
+func getProcessKey(process *KubeletProcess) []byte {
+	return []byte(fmt.Sprintf("process:%s:%s", process.namespace, process.podName))
 }
 
-func getImages(pod *corev1.Pod) []string {
-	images := make([]string, 0)
-	for _, c := range pod.Spec.InitContainers {
-		images = append(images, c.Image)
+func getProcessWorkDir(workdir string, pod *corev1.Pod, c corev1.Container) (string, error) {
+	join := filepath.Join(workdir, fmt.Sprintf("%-%-%s", pod.Namespace, pod.Name, c.Name))
+	s, err := filenamify.Filenamify(join, filenamify.Options{Replacement: "-"})
+	if err != nil {
+		return "", err
 	}
-	for _, c := range pod.Spec.Containers {
-		images = append(images, c.Image)
-	}
-	return images
-}
-
-func newProcessManager(im *ImageManager) *ProcessManager {
-	return &ProcessManager{
-		imageManager: im,
-	}
+	return s, nil
 }
