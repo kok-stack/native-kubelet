@@ -22,7 +22,19 @@ func (m *ProcessManager) create(ctx context.Context, pod *corev1.Pod) error {
 		return err
 	}
 	//运行
+	if err := runContainers(ctx, m.imageManager, m.containerManager, pod); err != nil {
+		return err
+	}
+}
 
+//普通容器,并发运行
+func runContainers(ctx context.Context, im *ImageManager, cm *ContainerManager, pod *corev1.Pod) error {
+	for i, c := range pod.Spec.Containers {
+		if err := cm.createContainer(ctx, im, c, pod); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 /*
@@ -30,18 +42,21 @@ func (m *ProcessManager) create(ctx context.Context, pod *corev1.Pod) error {
 2.解压到container
 3.run container
 */
+//init 容器按照顺序运行
 func runInitContainers(ctx context.Context, im *ImageManager, cm *ContainerManager, pod *corev1.Pod) error {
 	for i, c := range pod.Spec.InitContainers {
-		cm.createContainer(ctx, im, c)
+		if err := cm.createContainer(ctx, im, c, pod); err != nil {
+			return err
+		}
 	}
-
+	return nil
 }
 
 func pullImages(ctx context.Context, manager *ImageManager, images []string) error {
 	//TODO:支持docker镜像ImagePullSecrets
 	for _, image := range images {
 		if err := manager.PullImage(ctx, PullImageOpts{
-			SrcImage:                    dockershim.DockerImageIDPrefix + image,
+			SrcImage:                    dockerImageName(image),
 			DockerAuthConfig:            nil,
 			DockerBearerRegistryToken:   "",
 			DockerRegistryUserAgent:     "",
@@ -53,6 +68,10 @@ func pullImages(ctx context.Context, manager *ImageManager, images []string) err
 		}
 	}
 	return nil
+}
+
+func dockerImageName(image string) string {
+	return dockershim.DockerImageIDPrefix + image
 }
 
 func getImages(pod *corev1.Pod) []string {

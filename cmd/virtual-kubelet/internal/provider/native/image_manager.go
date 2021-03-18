@@ -2,16 +2,22 @@ package native
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/containerd/containerd/images"
 	"github.com/containers/common/pkg/retry"
 	cc "github.com/containers/image/v5/copy"
+	"github.com/containers/image/v5/directory"
 	"github.com/containers/image/v5/docker/archive"
 	"github.com/containers/image/v5/signature"
 	"github.com/containers/image/v5/transports"
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
 	"github.com/flytam/filenamify"
+	"github.com/opencontainers/go-digest"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/prologic/bitcask"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -22,6 +28,7 @@ import (
 )
 
 const pullLogPrefix = "native-kubelet-pullImage-"
+const manifestFileName = "manifest.json"
 
 type ImagePulling struct {
 	imageName string
@@ -68,7 +75,7 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 	if err != nil {
 		return fmt.Errorf("Invalid source name %s: %v", name, err)
 	}
-	dest, filep, err := imageDestDir(m.imagePath, opts.SrcImage)
+	dest, _, err := imageDestDir(m.imagePath, opts.SrcImage)
 	if err != nil {
 		return err
 	}
@@ -144,9 +151,100 @@ check:
 	if err != nil {
 		return err
 	}
-	return m.imageDb.Put([]byte(name), []byte(filep))
+	return m.imageDb.Put([]byte(name), []byte(dest))
 }
 
+func (m *ImageManager) decompressionImage(ctx context.Context, image string, workdir string) error {
+	policy, err := signature.DefaultPolicy(nil)
+	if err != nil {
+		return err
+	}
+	policyContext, err := signature.NewPolicyContext(policy)
+	if err != nil {
+		return err
+	}
+	//解析workdir
+	imageDir := getImageWorkDir(workdir)
+	destRef, err := directory.Transport.ParseReference(imageDir)
+	if err != nil {
+		return err
+	}
+	//获取image的path
+	imagePath, err := m.imageDb.Get([]byte(dockerImageName(image)))
+	if err != nil {
+		return err
+	}
+	//解析
+	srcRef, err := alltransports.ParseImageName(string(imagePath))
+	if err != nil {
+		return err
+	}
+	sourceCtx := &types.SystemContext{}
+	destinationCtx := &types.SystemContext{}
+
+	//解压镜像
+	if err := retry.RetryIfNecessary(ctx, func() error {
+		_, err := cc.Image(ctx, policyContext, destRef, srcRef, &cc.Options{
+			ReportWriter:       os.Stdout,
+			SourceCtx:          sourceCtx,
+			DestinationCtx:     destinationCtx,
+			ImageListSelection: cc.CopySystemImage,
+		})
+		return err
+	}, &retry.RetryOptions{
+		MaxRetry: 0,
+		Delay:    time.Microsecond * 100,
+	}); err != nil {
+		return err
+	}
+	//解压 "层"
+	content, err := ioutil.ReadFile(manifestDir(imageDir))
+	if err != nil {
+		return err
+	}
+	manifest := &v1.Manifest{}
+	err = json.Unmarshal(content, manifest)
+	if err != nil {
+		return err
+	}
+	for _, layer := range manifest.Layers {
+		switch layer.MediaType {
+		case images.MediaTypeDockerSchema2LayerGzip:
+			err = UnTar(getLayerFilePath(imageDir, layer.Digest), containerWorkDir(workdir))
+			if err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupport image %s layer %s media type:%s", image, layer.Digest.Encoded(), layer.MediaType)
+		}
+	}
+
+	return nil
+}
+
+func getLayerFilePath(imageDir string, digest digest.Digest) string {
+	return filepath.Join(imageDir, digest.Encoded())
+}
+
+func containerWorkDir(workdir string) string {
+	return filepath.Join(workdir, "container")
+}
+
+func manifestDir(workdir string) string {
+	return filepath.Join(workdir, manifestFileName)
+}
+
+func getImageWorkDir(workdir string) string {
+	return filepath.Join(workdir, "image")
+}
+
+/*
+path=/path
+imageName=docker://imagename
+
+docker-archive:/path/imagename.tar.gz
+/path/imagename.tar.gz
+*/
 func imageDestDir(path string, imageName string) (string, string, error) {
 	names := append(transports.ListNames(), "//")
 	replaceNames := make([]string, len(names)*2)
