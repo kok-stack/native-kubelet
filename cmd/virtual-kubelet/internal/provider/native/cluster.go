@@ -47,6 +47,7 @@ type Provider struct {
 	imageManager     *ImageManager
 	db               *bitcask.Bitcask
 	containerManager *ContainerManager
+	processManager   *ProcessManager
 }
 
 func (p *Provider) NotifyPods(ctx context.Context, f func(*v1.Pod)) {
@@ -85,6 +86,7 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 		return err2
 	}
 
+	p.processManager.run <- pod
 	//trimPod(pod, p.initConfig.NodeName)
 	//TODO:放到本地存储中
 	p.containerManager.create(ctx, pod)
