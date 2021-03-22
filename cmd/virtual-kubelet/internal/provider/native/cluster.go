@@ -13,12 +13,6 @@ import (
 	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
 	errors2 "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/remotecommand"
 	"path/filepath"
 	"time"
 )
@@ -30,6 +24,7 @@ const (
 	nodeNameKey      = "nodeName"
 	DbPath           = "data"
 	ImagePath        = "images"
+	ContainerPath    = "container"
 )
 
 type config struct {
@@ -42,12 +37,11 @@ type Provider struct {
 	startTime  time.Time
 	config     *config
 
-	podHandler       *PodEventHandler
-	nodeHandler      *NodeEventHandler
-	imageManager     *ImageManager
-	db               *bitcask.Bitcask
-	containerManager *ContainerManager
-	processManager   *ProcessManager
+	podHandler     *PodEventHandler
+	nodeHandler    *NodeEventHandler
+	imageManager   *ImageManager
+	db             *bitcask.Bitcask
+	processManager *ProcessManager
 }
 
 func (p *Provider) NotifyPods(ctx context.Context, f func(*v1.Pod)) {
@@ -63,40 +57,34 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	ctx = addAttributes(ctx, span, namespaceKey, pod.Namespace, nameKey, pod.Name, nodeNameKey, p.initConfig.NodeName)
 	log.G(ctx).Info("开始创建pod")
 
-	namespace := pod.Namespace
-	secrets := getSecrets(pod)
-	configMaps := getConfigMaps(pod)
-	timeCtx, cancelFunc := context.WithTimeout(ctx, time.Second*10)
-	defer cancelFunc()
-	if err2 := wait.PollImmediateUntil(time.Microsecond*100, func() (done bool, err error) {
-		//TODO:serviceAccount,pvc处理
-		//TODO:如何处理pod依赖的对象 serviceAccount-->role-->rolebinding,pvc-->pv-->storageClass,以及其他一些隐试依赖
-		for s := range secrets {
-			if err := p.syncSecret(ctx, s, namespace); err != nil {
-				return false, err
-			}
-		}
-		for s := range configMaps {
-			if err := p.syncConfigMap(ctx, s, namespace); err != nil {
-				return false, err
-			}
-		}
-		return true, nil
-	}, timeCtx.Done()); err2 != nil {
-		return err2
-	}
+	//namespace := pod.Namespace
+	//secrets := getSecrets(pod)
+	//configMaps := getConfigMaps(pod)
+	//timeCtx, cancelFunc := context.WithTimeout(ctx, time.Second*10)
+	//defer cancelFunc()
+	//if err2 := wait.PollImmediateUntil(time.Microsecond*100, func() (done bool, err error) {
+	//	for s := range secrets {
+	//		if err := p.syncSecret(ctx, s, namespace); err != nil {
+	//			return false, err
+	//		}
+	//	}
+	//	for s := range configMaps {
+	//		if err := p.syncConfigMap(ctx, s, namespace); err != nil {
+	//			return false, err
+	//		}
+	//	}
+	//	return true, nil
+	//}, timeCtx.Done()); err2 != nil {
+	//	return err2
+	//}
 
-	p.processManager.run <- pod
-	//trimPod(pod, p.initConfig.NodeName)
-	//TODO:放到本地存储中
-	p.containerManager.create(ctx, pod)
-
-	_, err := p.downClientSet.CoreV1().Pods(pod.GetNamespace()).Create(ctx, pod, v12.CreateOptions{})
+	err := p.processManager.RunPod(ctx, pod)
 	if err != nil {
-		log.G(ctx).Warnf("创建pod失败", err)
+		span.Logger().Error("创建pod错误", err.Error())
 		span.SetStatus(err)
+		return err
 	}
-	return err
+	return nil
 }
 
 func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
@@ -105,13 +93,11 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, pod.Namespace, nameKey, pod.Name, nodeNameKey, p.initConfig.NodeName)
 
-	trimPod(pod, p.initConfig.NodeName)
-	_, err := p.downClientSet.CoreV1().Pods(pod.GetNamespace()).Update(ctx, pod, v12.UpdateOptions{})
-	if err != nil {
-		span.Logger().Error("更新pod错误", err.Error())
-		span.SetStatus(err)
-	}
-	return nil
+	err := fmt.Errorf("unsupport UpdatePod %s/%s", pod.Namespace, pod.Name)
+
+	span.Logger().Error("更新pod错误", err.Error())
+	span.SetStatus(err)
+	return err
 }
 
 func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
@@ -120,7 +106,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, pod.Namespace, nameKey, pod.Name, nodeNameKey, p.initConfig.NodeName)
 
-	err := p.downClientSet.CoreV1().Pods(pod.GetNamespace()).Delete(ctx, pod.GetName(), v12.DeleteOptions{})
+	err := p.processManager.delete(ctx, pod)
 	if (err != nil && errors2.IsNotFound(err)) || err == nil {
 		return nil
 	} else {
@@ -135,18 +121,12 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*v1.Pod,
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, namespace, nameKey, name, nodeNameKey, p.initConfig.NodeName)
 
-	pod, err := p.initConfig.ResourceManager.GetPod(namespace, name)
+	pod, err := p.processManager.getPod(ctx, namespace, name)
 	if err != nil {
-		log.G(ctx).Warnf("获取up 集群pod出现错误:", err)
-		return nil, err
+		span.Logger().Error("get pod错误", err.Error())
+		span.SetStatus(err)
 	}
-	down, err := p.downPodLister.Pods(namespace).Get(name)
-	if err != nil {
-		log.G(ctx).Warnf("获取down 集群pod出现错误:", err)
-		return nil, err
-	}
-	pod.Status = down.Status
-	return pod, nil
+	return pod, err
 }
 
 func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v1.PodStatus, error) {
@@ -168,23 +148,12 @@ func (p *Provider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 	defer span.End()
 	ctx = addAttributes(ctx, span, nodeNameKey, p.initConfig.NodeName)
 
-	//获取down集群的virtual-kubelet的pod,然后转换status到up集群
-	list, err := p.downPodLister.List(labels.Everything())
+	pods, err := p.processManager.getPods(ctx)
 	if err != nil {
-		return nil, err
+		span.Logger().Error("获取pod列表出现错误", err.Error())
+		span.SetStatus(err)
 	}
-	pods := make([]*v1.Pod, len(list))
-	for i, pod := range list {
-		getPod, err := p.initConfig.ResourceManager.GetPod(pod.Namespace, pod.Name)
-		if err != nil {
-			span.Logger().WithField(namespaceKey, pod.Namespace).WithField(nameKey, pod.Name).Error(err)
-			span.SetStatus(err)
-			return nil, err
-		}
-		getPod.Status = pod.Status
-		pods[i] = getPod
-	}
-	return pods, nil
+	return pods, err
 }
 
 func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, opts api.ContainerLogOpts) (io.ReadCloser, error) {
@@ -192,94 +161,62 @@ func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, con
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, namespace, nameKey, podName, nodeNameKey, p.initConfig.NodeName)
 
-	tailLine := int64(opts.Tail)
-	limitBytes := int64(opts.LimitBytes)
-	sinceSeconds := opts.SinceSeconds
-	options := &v1.PodLogOptions{
-		Container:  containerName,
-		Timestamps: opts.Timestamps,
-		Follow:     opts.Follow,
-	}
-	if tailLine != 0 {
-		options.TailLines = &tailLine
-	}
-	if limitBytes != 0 {
-		options.LimitBytes = &limitBytes
-	}
-	if !opts.SinceTime.IsZero() {
-		*options.SinceTime = metav1.Time{Time: opts.SinceTime}
-	}
-	if sinceSeconds != 0 {
-		*options.SinceSeconds = int64(sinceSeconds)
-	}
-	if opts.Previous {
-		options.Previous = opts.Previous
-	}
-	if opts.Follow {
-		options.Follow = opts.Follow
-	}
-
-	logs := p.downClientSet.CoreV1().Pods(namespace).GetLogs(podName, options)
-	stream, err := logs.Stream(ctx)
-	if err != nil {
-		span.Logger().Error(err.Error())
-		span.SetStatus(err)
-	}
-	return stream, err
+	//TODO:实现
+	return nil, fmt.Errorf("unsupport GetContainerLogs")
 }
 
 func (p *Provider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {
 	ctx, span := trace.StartSpan(ctx, "Provider.RunInContainer")
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, namespace, nameKey, podName, nodeNameKey, p.initConfig.NodeName)
-
-	defer func() {
-		if attach.Stdout() != nil {
-			attach.Stdout().Close()
-		}
-		if attach.Stderr() != nil {
-			attach.Stderr().Close()
-		}
-	}()
-
-	req := p.downClientSet.CoreV1().RESTClient().
-		Post().
-		Namespace(namespace).
-		Resource("pods").
-		Name(podName).
-		SubResource("exec").
-		Timeout(0).
-		VersionedParams(&v1.PodExecOptions{
-			Container: containerName,
-			Command:   cmd,
-			Stdin:     attach.Stdin() != nil,
-			Stdout:    attach.Stdout() != nil,
-			Stderr:    attach.Stderr() != nil,
-			TTY:       attach.TTY(),
-		}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(p.downConfig, "POST", req.URL())
-	if err != nil {
-		err := fmt.Errorf("could not make remote command: %v", err)
-		span.Logger().Error(err.Error())
-		span.SetStatus(err)
-		return err
-	}
-
-	ts := &termSize{attach: attach}
-
-	err = exec.Stream(remotecommand.StreamOptions{
-		Stdin:             attach.Stdin(),
-		Stdout:            attach.Stdout(),
-		Stderr:            attach.Stderr(),
-		Tty:               attach.TTY(),
-		TerminalSizeQueue: ts,
-	})
-	if err != nil {
-		span.Logger().Error(err.Error())
-		span.SetStatus(err)
-		return err
-	}
+	//
+	//defer func() {
+	//	if attach.Stdout() != nil {
+	//		attach.Stdout().Close()
+	//	}
+	//	if attach.Stderr() != nil {
+	//		attach.Stderr().Close()
+	//	}
+	//}()
+	//
+	//req := p.downClientSet.CoreV1().RESTClient().
+	//	Post().
+	//	Namespace(namespace).
+	//	Resource("pods").
+	//	Name(podName).
+	//	SubResource("exec").
+	//	Timeout(0).
+	//	VersionedParams(&v1.PodExecOptions{
+	//		Container: containerName,
+	//		Command:   cmd,
+	//		Stdin:     attach.Stdin() != nil,
+	//		Stdout:    attach.Stdout() != nil,
+	//		Stderr:    attach.Stderr() != nil,
+	//		TTY:       attach.TTY(),
+	//	}, scheme.ParameterCodec)
+	//
+	//exec, err := remotecommand.NewSPDYExecutor(p.downConfig, "POST", req.URL())
+	//if err != nil {
+	//	err := fmt.Errorf("could not make remote command: %v", err)
+	//	span.Logger().Error(err.Error())
+	//	span.SetStatus(err)
+	//	return err
+	//}
+	//
+	//ts := &termSize{attach: attach}
+	//
+	//err = exec.Stream(remotecommand.StreamOptions{
+	//	Stdin:             attach.Stdin(),
+	//	Stdout:            attach.Stdout(),
+	//	Stderr:            attach.Stderr(),
+	//	Tty:               attach.TTY(),
+	//	TerminalSizeQueue: ts,
+	//})
+	//if err != nil {
+	//	span.Logger().Error(err.Error())
+	//	span.SetStatus(err)
+	//	return err
+	//}
 
 	return nil
 }
@@ -298,7 +235,6 @@ func (p *Provider) start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	//TODO:关闭
 	db, err := bitcask.Open(filepath.Join(p.config.WorkDir, DbPath))
 	if err != nil {
 		return err
@@ -311,7 +247,7 @@ func (p *Provider) start(ctx context.Context) error {
 	}()
 	p.db = db
 	p.imageManager = NewImageManager(filepath.Join(p.config.WorkDir, ImagePath), db)
-	p.containerManager = newContainerManager(p.imageManager)
+	p.processManager = NewProcessManager(filepath.Join(p.config.WorkDir, ContainerPath), db, p.imageManager)
 	return nil
 }
 

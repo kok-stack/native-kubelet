@@ -222,14 +222,8 @@ func nodeConditions() []corev1.NodeCondition {
 }
 
 func (p *Provider) Ping(ctx context.Context) error {
-	pingCtx, span := trace.StartSpan(ctx, "Ping")
+	_, span := trace.StartSpan(ctx, "Ping")
 	defer span.End()
-	version, err := p.downClientSet.Discovery().ServerVersion()
-	if err != nil {
-		log.G(pingCtx).Warnf("获取down 集群版本错误", err)
-		return err
-	}
-	log.G(pingCtx).Debugf("down 集群版本:", version.String())
 	return nil
 }
 

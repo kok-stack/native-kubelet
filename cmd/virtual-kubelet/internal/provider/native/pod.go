@@ -2,22 +2,12 @@ package native
 
 import (
 	"context"
-	"github.com/kok-stack/native-kubelet/cmd/virtual-kubelet/internal/commands/root"
-	"github.com/kok-stack/native-kubelet/log"
-	"github.com/kok-stack/native-kubelet/node/api"
 	"github.com/kok-stack/native-kubelet/trace"
 	v1 "k8s.io/api/core/v1"
-	errors2 "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/remotecommand"
 	stats "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 	"k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	"reflect"
 	"strings"
-	"time"
 )
 
 func (p *Provider) GetStatsSummary(ctx context.Context) (*stats.Summary, error) {
@@ -26,33 +16,33 @@ func (p *Provider) GetStatsSummary(ctx context.Context) (*stats.Summary, error) 
 
 	var summary stats.Summary
 
-	metrics, err := p.downMetricsClientSet.MetricsV1beta1().PodMetricses(v1.NamespaceAll).List(ctx, v12.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	var cpuAll, memoryAll uint64
-	var t time.Time
-	for _, metric := range metrics.Items {
-		podStats := convert2PodStats(&metric)
-		summary.Pods = append(summary.Pods, *podStats)
-		cpuAll += *podStats.CPU.UsageNanoCores
-		memoryAll += *podStats.Memory.WorkingSetBytes
-		if t.IsZero() {
-			t = podStats.StartTime.Time
-		}
-	}
-	summary.Node = stats.NodeStats{
-		NodeName:  p.initConfig.NodeName,
-		StartTime: metav1.Time{Time: t},
-		CPU: &stats.CPUStats{
-			Time:           metav1.Time{Time: t},
-			UsageNanoCores: &cpuAll,
-		},
-		Memory: &stats.MemoryStats{
-			Time:            metav1.Time{Time: t},
-			WorkingSetBytes: &memoryAll,
-		},
-	}
+	//metrics, err := p.downMetricsClientSet.MetricsV1beta1().PodMetricses(v1.NamespaceAll).List(ctx, v12.ListOptions{})
+	//if err != nil {
+	//	return nil, err
+	//}
+	//var cpuAll, memoryAll uint64
+	//var t time.Time
+	//for _, metric := range metrics.Items {
+	//	podStats := convert2PodStats(&metric)
+	//	summary.Pods = append(summary.Pods, *podStats)
+	//	cpuAll += *podStats.CPU.UsageNanoCores
+	//	memoryAll += *podStats.Memory.WorkingSetBytes
+	//	if t.IsZero() {
+	//		t = podStats.StartTime.Time
+	//	}
+	//}
+	//summary.Node = stats.NodeStats{
+	//	NodeName:  p.initConfig.NodeName,
+	//	StartTime: metav1.Time{Time: t},
+	//	CPU: &stats.CPUStats{
+	//		Time:           metav1.Time{Time: t},
+	//		UsageNanoCores: &cpuAll,
+	//	},
+	//	Memory: &stats.MemoryStats{
+	//		Time:            metav1.Time{Time: t},
+	//		WorkingSetBytes: &memoryAll,
+	//	},
+	//}
 	return &summary, nil
 }
 
@@ -168,21 +158,6 @@ func getSecrets(pod *v1.Pod) map[string]interface{} {
 	return m
 }
 
-// termSize helps exec termSize
-type termSize struct {
-	attach api.AttachIO
-}
-
-// Next returns the new terminal size after the terminal has been resized. It returns nil when
-// monitoring has been stopped.
-func (t *termSize) Next() *remotecommand.TerminalSize {
-	resize := <-t.attach.Resize()
-	return &remotecommand.TerminalSize{
-		Height: resize.Height,
-		Width:  resize.Width,
-	}
-}
-
 type PodEventHandler struct {
 	ctx          context.Context
 	p            *Provider
@@ -246,205 +221,8 @@ func (p *PodEventHandler) start(ctx context.Context) {
 	}()
 }
 
-func (p *Provider) syncConfigMap(ctx context.Context, cmName string, namespace string) error {
-	subCtx, span := trace.StartSpan(ctx, "Provider.syncConfigMap")
-	defer span.End()
-	subCtx = span.WithFields(subCtx, log.Fields{
-		namespaceKey: namespace,
-		"configMap":  cmName,
-	})
-	upConfigMap, err := p.initConfig.ResourceManager.GetConfigMap(cmName, namespace)
-	if err != nil {
-		span.Logger().Error("获取up集群configMap错误", err.Error())
-		span.SetStatus(err)
-		return err
-	}
-	downCM, err := p.downConfigMapLister.ConfigMaps(namespace).Get(cmName)
-	if err != nil {
-		if !errors2.IsNotFound(err) {
-			span.Logger().Error("获取down集群configMap错误", err.Error())
-			span.SetStatus(err)
-			return err
-		}
-		//如果不存在则创建
-		span.Logger().Debug("down集群configMap不存在,执行创建")
-		trimObjectMeta(&upConfigMap.ObjectMeta)
-		_, err = p.downClientSet.CoreV1().ConfigMaps(namespace).Create(subCtx, upConfigMap, v12.CreateOptions{})
-		if err != nil && !errors2.IsAlreadyExists(err) {
-			span.Logger().Debug("down集群configMap创建错误", err.Error())
-			span.SetStatus(err)
-			return err
-		}
-	} else {
-		//存在则需要比对内容并更新
-		trimObjectMeta(&upConfigMap.ObjectMeta)
-		trimObjectMeta(&downCM.ObjectMeta)
-		if reflect.DeepEqual(upConfigMap, downCM) {
-			span.Logger().Debug("两集群configMap一致,忽略")
-			return nil
-		}
-		_, err = p.downClientSet.CoreV1().ConfigMaps(namespace).Update(subCtx, upConfigMap, v12.UpdateOptions{})
-		if err != nil && !errors2.IsAlreadyExists(err) {
-			span.Logger().Debug("down集群configMap创建错误", err.Error())
-			span.SetStatus(err)
-			return err
-		}
-	}
-	span.Logger().Debug("down集群configMap同步完成")
-	return err
-}
-
-const downVirtualKubeletLabel = "virtual-kubelet"
-const downVirtualKubeletLabelValue = "true"
-
-func getDownPodVirtualKubeletLabels() string {
-	return labels.FormatLabels(map[string]string{
-		downVirtualKubeletLabel: downVirtualKubeletLabelValue,
-	})
-}
-
-func addDownPodVirtualKubeletLabels(pod *v1.Pod) {
-	l := pod.Labels
-	if l == nil {
-		l = make(map[string]string)
-	}
-	l[downVirtualKubeletLabel] = downVirtualKubeletLabelValue
-	pod.Labels = l
-}
-
-func (p *Provider) syncSecret(ctx context.Context, secretName string, namespace string) error {
-	subCtx, span := trace.StartSpan(ctx, "Provider.syncSecret")
-	defer span.End()
-	subCtx = span.WithFields(subCtx, log.Fields{
-		namespaceKey: namespace,
-		"secret":     secretName,
-	})
-
-	if isDefaultSecret(secretName) {
-		span.Logger().Info("default secret,忽略")
-		return nil
-	}
-	upSecret, err := p.initConfig.ResourceManager.GetSecret(secretName, namespace)
-	if err != nil {
-		span.Logger().Error("获取up集群secret错误", err.Error())
-		span.SetStatus(err)
-		return err
-	}
-	downSecret, err := p.downSecretLister.Secrets(namespace).Get(secretName)
-	//如果不存在则创建
-	if err != nil {
-		if !errors2.IsNotFound(err) {
-			span.Logger().Error("获取down集群secret错误", err.Error())
-			span.SetStatus(err)
-			return err
-		}
-		span.Logger().Debug("down集群secret不存在,执行创建")
-		trimObjectMeta(&upSecret.ObjectMeta)
-		_, err = p.downClientSet.CoreV1().Secrets(namespace).Create(subCtx, upSecret, v12.CreateOptions{})
-		if err != nil && !errors2.IsAlreadyExists(err) {
-			span.Logger().Debug("down集群secret创建错误", err.Error())
-			span.SetStatus(err)
-			return err
-		}
-	} else {
-		//存在则对比,更新
-		trimObjectMeta(&upSecret.ObjectMeta)
-		trimObjectMeta(&downSecret.ObjectMeta)
-		if reflect.DeepEqual(upSecret, downSecret) {
-			span.Logger().Debug("两集群secret一致,忽略")
-			return nil
-		}
-		_, err = p.downClientSet.CoreV1().Secrets(namespace).Update(subCtx, upSecret, v12.UpdateOptions{})
-		if err != nil && !errors2.IsAlreadyExists(err) {
-			span.Logger().Debug("down集群secret更新错误", err.Error())
-			span.SetStatus(err)
-			return err
-		}
-	}
-	span.Logger().Debug("down集群secret同步完成")
-	return nil
-}
-
 func isDefaultSecret(secretName string) bool {
 	return strings.HasPrefix(secretName, defaultTokenNamePrefix)
 }
 
 const defaultTokenNamePrefix = "default-token"
-
-/*
-通过此处修改pod
-1.在down集群中添加 virtual-kubelet标识
-2.删除Meta中的部分信息
-3.删除nodeName
-4.删除默认的Secret
-5.设置默认的status
-6.删除nodeSelector中virtual-kubelet标识
-7.删除tolerations中的virtual-kubelet标识
-*/
-func trimPod(pod *v1.Pod, nodeName string) {
-	addDownPodVirtualKubeletLabels(pod)
-	trimObjectMeta(&pod.ObjectMeta)
-	pod.Spec.NodeName = ""
-
-	vols := make([]v1.Volume, 0, len(pod.Spec.Volumes))
-	for _, v := range pod.Spec.Volumes {
-		if isDefaultSecret(v.Name) {
-			continue
-		}
-		vols = append(vols, v)
-	}
-	pod.Spec.Containers = trimContainers(pod.Spec.Containers)
-	pod.Spec.InitContainers = trimContainers(pod.Spec.InitContainers)
-	pod.Spec.Volumes = vols
-	pod.Status = v1.PodStatus{}
-	trimNodeSelector(pod, nodeName)
-	trimTolerations(pod)
-}
-
-func trimTolerations(pod *v1.Pod) {
-	tolerations := pod.Spec.Tolerations
-	for i, item := range tolerations {
-		if item.Key != root.DefaultTaintKey {
-			continue
-		}
-		tolerations = append(tolerations[0:i], tolerations[i+1:]...)
-	}
-	pod.Spec.Tolerations = tolerations
-}
-
-func trimNodeSelector(pod *v1.Pod, nodeName string) {
-	for s, v := range pod.Spec.NodeSelector {
-		if s != root.NodeTypeLabel && s != root.NodeRoleLabel && s != root.NodeHostNameLabel {
-			continue
-		}
-		if v != root.NodeRoleValue && v != root.NodeTypeValue && v != nodeName {
-			continue
-		}
-		delete(pod.Spec.NodeSelector, s)
-	}
-}
-
-func trimObjectMeta(meta *v12.ObjectMeta) {
-	meta.SetUID("")
-	meta.SetResourceVersion("")
-	meta.SetSelfLink("")
-	meta.SetOwnerReferences(nil)
-}
-
-func trimContainers(containers []v1.Container) []v1.Container {
-	var newContainers []v1.Container
-
-	for _, c := range containers {
-		var volMounts []v1.VolumeMount
-		for _, v := range c.VolumeMounts {
-			if isDefaultSecret(v.Name) {
-				continue
-			}
-			volMounts = append(volMounts, v)
-		}
-		c.VolumeMounts = volMounts
-		newContainers = append(newContainers, c)
-	}
-
-	return newContainers
-}
