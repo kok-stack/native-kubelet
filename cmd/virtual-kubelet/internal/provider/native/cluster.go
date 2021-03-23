@@ -106,7 +106,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, pod.Namespace, nameKey, pod.Name, nodeNameKey, p.initConfig.NodeName)
 
-	err := p.processManager.delete(ctx, pod)
+	err := p.processManager.DeletePod(ctx, pod)
 	if (err != nil && errors2.IsNotFound(err)) || err == nil {
 		return nil
 	} else {

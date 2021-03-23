@@ -13,7 +13,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+type ProcessStore interface {
+	Key() []byte
+}
 
 type ProcessManager struct {
 	workdir   string
@@ -21,7 +26,22 @@ type ProcessManager struct {
 	im        *ImageManager
 }
 
-const ProcessPrefix = "process://"
+func (m *ProcessManager) Put(store ProcessStore) error {
+	marshal, err := json.Marshal(store)
+	if err != nil {
+		return err
+	}
+	err = m.processDb.Put(store.Key(), marshal)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *ProcessManager) Delete(store ProcessStore) error {
+	return m.processDb.Delete(store.Key())
+}
+
 const PodPrefix = "pod://"
 
 func NewProcessManager(workdir string, processDb *bitcask.Bitcask, im *ImageManager) *ProcessManager {
@@ -29,77 +49,132 @@ func NewProcessManager(workdir string, processDb *bitcask.Bitcask, im *ImageMana
 }
 
 func (m *ProcessManager) Start(ctx context.Context) error {
-	//根据存储,查找那些进程在运行,那些没有运行
-	err := m.processDb.Scan([]byte(ProcessPrefix), func(key []byte) error {
+	return m.processDb.Scan([]byte(PodPrefix), func(key []byte) error {
 		get, err := m.processDb.Get(key)
 		if err != nil {
 			return err
 		}
-		cp := &ContainerProcess{}
-		err = json.Unmarshal(get, cp)
+		pp := &PodProcess{}
+		err = json.Unmarshal(get, pp)
 		if err != nil {
 			return err
 		}
-		cp.im = m.im
-		cp.pm = m
-		pid := int32(cp.Pid)
-		exists, err := process.PidExists(pid)
-		if err != nil {
-			return err
-		}
-		if exists {
-			//重启健康检查
-			startHealthCheck(ctx, cp, cp.Pid)
-		} else {
-			//重新运行
-			go cp.run(ctx)
-		}
+		pp.run(ctx)
 		return nil
 	})
-	if err != nil {
-		return err
-	}
 
-	return nil
+	//根据存储,查找那些进程在运行,那些没有运行
+	//err := m.processDb.Scan([]byte(ProcessPrefix), func(key []byte) error {
+	//	get, err := m.processDb.Get(key)
+	//	if err != nil {
+	//		return err
+	//	}
+	//	cp := &ContainerProcess{}
+	//	err = json.Unmarshal(get, cp)
+	//	if err != nil {
+	//		return err
+	//	}
+	//	cp.im = m.im
+	//	cp.pm = m
+	//	pid := int32(cp.Pid)
+	//	exists, err := process.PidExists(pid)
+	//	if err != nil {
+	//		return err
+	//	}
+	//	if exists {
+	//		//重启健康检查
+	//		startHealthCheck(ctx, cp, cp.Pid)
+	//	} else {
+	//		//重新运行
+	//		go cp.run(ctx)
+	//	}
+	//	return nil
+	//})
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//return nil
 }
 
 func (m *ProcessManager) RunPod(ctx context.Context, p *corev1.Pod) error {
 	//转换pod为进程
 	proc, err := m.convertPod2Process(ctx, p)
 	if err != nil {
-		//TODO: 转换pod出现错误,将错误使用record记录到pod中
-	}
-	marshal, err := json.Marshal(proc)
-	if err != nil {
 		return err
 	}
-	err = m.processDb.Put(getPodKey(p.Namespace, p.Name), marshal)
-	if err != nil {
+	if err := m.Put(proc); err != nil {
 		return err
 	}
-	return proc.run(ctx)
+	proc.run(ctx)
+	return nil
 }
 
 type PodProcess struct {
-	Workdir   string `json:"workdir"`
-	PodName   string `json:"pod_name"`
-	Namespace string `json:"namespace"`
+	pm        *ProcessManager `json:"-"`
+	Workdir   string          `json:"workdir"`
+	PodName   string          `json:"pod_name"`
+	Namespace string          `json:"namespace"`
 
 	ProcessChain []*ContainerProcess `json:"process_chain"`
 	Pod          *corev1.Pod         `json:"pod"`
 
-	//Index        int                 `json:"index"`
+	Index int `json:"index"`
+}
+
+func (p *PodProcess) Key() []byte {
+	return getPodKey(p.Namespace, p.PodName)
 }
 
 //如何记录index?如何更新pod?eventbus?
-func (p *PodProcess) run(ctx context.Context) error {
-	for _, proc := range p.ProcessChain {
-		err := proc.run(ctx)
-		if err != nil {
+func (p *PodProcess) run(ctx context.Context) {
+	go func() {
+		for {
+			if p.Index >= len(p.ProcessChain) {
+				break
+			}
+			cp := p.ProcessChain[p.Index]
+			err := cp.run(ctx)
+			if err != nil {
+				//TODO:record
+				continue
+			}
+			p.Index++
+			if err := p.pm.Put(p); err != nil {
+				panic(err)
+			}
+		}
+	}()
+}
+
+/**
+停止PodProcess
+*/
+func (p *PodProcess) stop(ctx context.Context) error {
+	//找到正在运行的ContainerProcess
+	cps := p.getRuningContainerProcess()
+	//kill
+	for _, cp := range cps {
+		if err := cp.stop(ctx); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+//TODO:考虑并发问题
+func (p *PodProcess) getRuningContainerProcess() []*ContainerProcess {
+	result := make([]*ContainerProcess, 0)
+	for i, cp := range p.ProcessChain {
+		if i > p.Index {
+			continue
+		}
+		if cp.Dead {
+			continue
+		}
+		result = append(result, cp)
+	}
+	return result
 }
 
 //序列化tag
@@ -113,7 +188,11 @@ type ContainerProcess struct {
 	Sync          bool                 `json:"sync"`
 	RestartPolicy corev1.RestartPolicy `json:"restart_policy"`
 
-	Pid int `json:"pid"`
+	//状态信息
+	Pid                int  `json:"pid"`
+	PullImage          bool `json:"pull_image"`
+	DecompressionImage bool `json:"decompression_image"`
+	Dead               bool `json:"dead"`
 
 	im *ImageManager   `json:"-"`
 	pm *ProcessManager `json:"-"`
@@ -132,6 +211,7 @@ func (m *ProcessManager) convertPod2Process(ctx context.Context, p *corev1.Pod) 
 		PodName:   p.Name,
 		Namespace: p.Namespace,
 		Pod:       p,
+		pm:        m,
 	}
 	proc.ProcessChain = make([]*ContainerProcess, len(p.Spec.InitContainers)+len(p.Spec.Containers))
 	for _, c := range p.Spec.InitContainers {
@@ -151,46 +231,25 @@ func (m *ProcessManager) convertPod2Process(ctx context.Context, p *corev1.Pod) 
 	return proc, nil
 }
 
-func (m *ProcessManager) delete(ctx context.Context, pod *corev1.Pod) error {
-	for _, c := range pod.Spec.InitContainers {
-		if err := m.processDb.Delete(getProcessKey(pod.Namespace, pod.Name, c.Name)); err != nil {
-			return err
-		}
+func (m *ProcessManager) DeletePod(ctx context.Context, pod *corev1.Pod) error {
+	origin, err := m.processDb.Get(getPodKey(pod.Namespace, pod.Name))
+	if err != nil {
+		return err
 	}
-	for _, c := range pod.Spec.Containers {
-		if err := m.processDb.Delete(getProcessKey(pod.Namespace, pod.Name, c.Name)); err != nil {
-			return err
-		}
+
+	p := &PodProcess{}
+	if err = json.Unmarshal(origin, p); err != nil {
+		return err
 	}
-	return m.processDb.Scan(getProcessPodKey(pod), func(key []byte) error {
-		origin, err := m.processDb.Get(key)
-		if err != nil {
-			return err
-		}
-		c := &ContainerProcess{}
-		err = json.Unmarshal(origin, c)
-		if err != nil {
-			return err
-		}
-		proc, err := process.NewProcess(int32(c.Pid))
-		if err != nil {
-			return err
-		}
-		//TODO:优雅关闭
-		return proc.KillWithContext(ctx)
-	})
+	if err = p.stop(ctx); err != nil {
+		return err
+	}
+
+	return m.Delete(p)
 }
 
 func getPodKey(ns, podName string) []byte {
 	return []byte(fmt.Sprintf("%s%s:%s", PodPrefix, ns, podName))
-}
-
-func getProcessPodKey(pod *corev1.Pod) []byte {
-	return []byte(fmt.Sprintf("%s%s:%s", ProcessPrefix, pod.Namespace, pod.Name))
-}
-
-func getProcessKey(ns, podName, containerName string) []byte {
-	return []byte(fmt.Sprintf("%s%s:%s:%s", ProcessPrefix, ns, podName, containerName))
 }
 
 func (m *ProcessManager) getPod(ctx context.Context, namespace string, name string) (*corev1.Pod, error) {
@@ -230,50 +289,58 @@ func (m *ProcessManager) getPods(ctx context.Context) ([]*corev1.Pod, error) {
 func (p *ContainerProcess) run(ctx context.Context) error {
 	f := func() error {
 		//TODO:检查镜像是否存在,如果不存在则pull
-		if err := p.im.PullImage(ctx, PullImageOpts{
-			SrcImage: dockerImageName(p.Container.Image),
-			//DockerAuthConfig:            nil,
-			//DockerBearerRegistryToken:   "",
-			//DockerRegistryUserAgent:     "",
-			//DockerInsecureSkipTLSVerify: 0,
-			//Timeout:                     0,
-			//RetryCount:                  0,
-		}); err != nil {
-			return err
+		if p.PullImage {
+			if err := p.im.PullImage(ctx, PullImageOpts{
+				SrcImage: dockerImageName(p.Container.Image),
+				//DockerAuthConfig:            nil,
+				//DockerBearerRegistryToken:   "",
+				//DockerRegistryUserAgent:     "",
+				//DockerInsecureSkipTLSVerify: 0,
+				//Timeout:                     0,
+				//RetryCount:                  0,
+			}); err != nil {
+				return err
+			}
 		}
 		//解压镜像
-		if err := p.im.decompressionImage(ctx, p.Container.Image, p.Workdir); err != nil {
-			return err
+		if p.DecompressionImage {
+			if err := p.im.decompressionImage(ctx, p.Container.Image, p.Workdir); err != nil {
+				return err
+			}
 		}
 		//TODO:获取configmap和secret
 
-		//TODO:启动进程,设置环境变量
-		cmd := exec.Command(strings.Join(p.Container.Command, " "), p.Container.Args...)
-		cmd.Dir = filepath.Join(p.Workdir, p.Container.WorkingDir)
-		cmd.Stdin = strings.NewReader("")
-		//TODO:设置输出
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Start()
-		if err != nil {
-			return err
+		if p.Pid == 0 && !p.Dead {
+			//TODO:启动进程,设置环境变量
+			cmd := exec.Command(strings.Join(p.Container.Command, " "), p.Container.Args...)
+			cmd.Dir = filepath.Join(p.Workdir, p.Container.WorkingDir)
+			cmd.Stdin = strings.NewReader("")
+			//TODO:设置输出
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			err := cmd.Start()
+			if err != nil {
+				return err
+			}
+
+			//TODO:产生process启动的事件(PID)
+			//存储进程信息
+			//p.Pid = cmd.Process.Pid
+			//if err := p.pm.Put(p); err != nil {
+			//	return err
+			//}
+			//defer func() {
+			//	if err := p.pm.Delete(p); err != nil {
+			//		panic(err)
+			//	}
+			//}()
+			//return cmd.Wait()
 		}
-		startHealthCheck(ctx, p, cmd.Process.Pid)
-		//存储进程信息
-		key := getProcessKey(p.Namespace, p.PodName, p.Container.Name)
-		p.Pid = cmd.Process.Pid
-		value, err := json.Marshal(p)
-		if err != nil {
-			return err
-		}
-		err = p.pm.processDb.Put(key, value)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			p.pm.processDb.Delete(key)
-		}()
-		return cmd.Wait()
+		startHealthCheck(ctx, p)
+		//等待结束,并发送进程结束事件
+		waitProcessDead(ctx, p)
+		//TODO:发送结束事件
+		return nil
 	}
 	if p.Sync {
 		return f()
@@ -283,11 +350,40 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 	return nil
 }
 
-func startHealthCheck(ctx context.Context, p *ContainerProcess, pid int) {
+func (p *ContainerProcess) stop(ctx context.Context) error {
+	proc, err := process.NewProcess(int32(p.Pid))
+	if err != nil {
+		return err
+	}
+	//TODO:优雅关闭
+	return proc.KillWithContext(ctx)
+}
+
+func waitProcessDead(ctx context.Context, p *ContainerProcess) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			exists, err := process.PidExists(int32(p.Pid))
+			if err != nil {
+				panic(err)
+			}
+			if !exists {
+				return
+			}
+		}
+	}
+}
+
+//TODO:健康检查
+func startHealthCheck(ctx context.Context, p *ContainerProcess) {
 	go func(ctx context.Context, p *ContainerProcess) {
 		for {
 			//在进程存在情况下,进行健康检查,进程不存在或出现错误,则跳过
-			exists, err := process.PidExists(int32(pid))
+			exists, err := process.PidExists(int32(p.Pid))
 			if err != nil {
 				panic(err)
 			}
