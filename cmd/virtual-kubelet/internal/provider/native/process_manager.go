@@ -8,6 +8,7 @@ import (
 	"github.com/prologic/bitcask"
 	"github.com/shirou/gopsutil/process"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ type ProcessManager struct {
 	workdir   string
 	processDb *bitcask.Bitcask
 	im        *ImageManager
+	record    record.EventRecorder
 }
 
 func (m *ProcessManager) Put(store ProcessStore) error {
@@ -44,11 +46,41 @@ func (m *ProcessManager) Delete(store ProcessStore) error {
 
 const PodPrefix = "pod://"
 
-func NewProcessManager(workdir string, processDb *bitcask.Bitcask, im *ImageManager) *ProcessManager {
-	return &ProcessManager{workdir: workdir, processDb: processDb, im: im}
+func NewProcessManager(workdir string, processDb *bitcask.Bitcask, im *ImageManager, record record.EventRecorder) *ProcessManager {
+	return &ProcessManager{workdir: workdir, processDb: processDb, im: im, record: record}
+}
+
+var bus chan ProcessEvent
+var subscribes = make([]chan ProcessEvent, 0)
+
+func AddSubscribe(ch chan ProcessEvent) {
+	subscribes = append(subscribes, ch)
 }
 
 func (m *ProcessManager) Start(ctx context.Context) error {
+	//分发事件
+	go func() {
+		select {
+		case <-ctx.Done():
+		case event := <-bus:
+			for _, v := range subscribes {
+				v <- event
+			}
+		}
+	}()
+	go func() {
+		events := make(chan ProcessEvent)
+		AddSubscribe(events)
+
+		select {
+		case <-ctx.Done():
+		case event := <-events:
+			m.recordEvent(event)
+
+			m.Put(event.getPodProcess())
+		}
+	}()
+
 	return m.processDb.Scan([]byte(PodPrefix), func(key []byte) error {
 		get, err := m.processDb.Get(key)
 		if err != nil {
@@ -62,39 +94,6 @@ func (m *ProcessManager) Start(ctx context.Context) error {
 		pp.run(ctx)
 		return nil
 	})
-
-	//根据存储,查找那些进程在运行,那些没有运行
-	//err := m.processDb.Scan([]byte(ProcessPrefix), func(key []byte) error {
-	//	get, err := m.processDb.Get(key)
-	//	if err != nil {
-	//		return err
-	//	}
-	//	cp := &ContainerProcess{}
-	//	err = json.Unmarshal(get, cp)
-	//	if err != nil {
-	//		return err
-	//	}
-	//	cp.im = m.im
-	//	cp.pm = m
-	//	pid := int32(cp.Pid)
-	//	exists, err := process.PidExists(pid)
-	//	if err != nil {
-	//		return err
-	//	}
-	//	if exists {
-	//		//重启健康检查
-	//		startHealthCheck(ctx, cp, cp.Pid)
-	//	} else {
-	//		//重新运行
-	//		go cp.run(ctx)
-	//	}
-	//	return nil
-	//})
-	//if err != nil {
-	//	return err
-	//}
-	//
-	//return nil
 }
 
 func (m *ProcessManager) RunPod(ctx context.Context, p *corev1.Pod) error {
@@ -126,23 +125,25 @@ func (p *PodProcess) Key() []byte {
 	return getPodKey(p.Namespace, p.PodName)
 }
 
-//如何记录index?如何更新pod?eventbus?
 func (p *PodProcess) run(ctx context.Context) {
 	go func() {
 		for {
+			if p.Index == 0 {
+				bus <- PodProcessStart{ProcessEvent: BaseProcessEvent{p: p, cp: nil}, t: time.Now()}
+			}
 			if p.Index >= len(p.ProcessChain) {
 				break
 			}
+			subCtx := context.WithValue(context.WithValue(ctx, podProcessKey, p), indexKey, p.Index)
 			cp := p.ProcessChain[p.Index]
-			err := cp.run(ctx)
+			err := cp.run(subCtx)
 			if err != nil {
+				bus <- ContainerProcessError{ProcessEvent: BaseProcessEvent{p: p, cp: cp, err: err, msg: fmt.Sprintf("run container process error,index:%v", p.Index)}, index: p.Index}
 				//TODO:record
 				continue
 			}
 			p.Index++
-			if err := p.pm.Put(p); err != nil {
-				panic(err)
-			}
+			bus <- ContainerProcessNext{ProcessEvent: BaseProcessEvent{p: p, cp: cp, err: err, msg: fmt.Sprintf("run container process finish, run next ,index:%v", p.Index)}, index: p.Index}
 		}
 	}()
 }
@@ -286,10 +287,27 @@ func (m *ProcessManager) getPods(ctx context.Context) ([]*corev1.Pod, error) {
 	return pods, nil
 }
 
+func (m *ProcessManager) recordEvent(event ProcessEvent) {
+	var eventtype string
+	if event.getError() != nil {
+		eventtype = corev1.EventTypeNormal
+	} else {
+		eventtype = corev1.EventTypeWarning
+	}
+	m.record.Event(event.getPodProcess().Pod, eventtype, "", event.getMsg())
+}
+
 func (p *ContainerProcess) run(ctx context.Context) error {
 	f := func() error {
-		//TODO:检查镜像是否存在,如果不存在则pull
+		podProc := ctx.Value(podProcessKey).(*PodProcess)
+		index := ctx.Value(indexKey).(int)
+
 		if p.PullImage {
+			bus <- BaseProcessEvent{
+				p:   podProc,
+				cp:  p,
+				msg: fmt.Sprintf("start pull image %s", p.Container.Image),
+			}
 			if err := p.im.PullImage(ctx, PullImageOpts{
 				SrcImage: dockerImageName(p.Container.Image),
 				//DockerAuthConfig:            nil,
@@ -301,14 +319,39 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			}); err != nil {
 				return err
 			}
+		} else {
+			bus <- BaseProcessEvent{
+				p:   podProc,
+				cp:  p,
+				msg: fmt.Sprintf("image %s pull finish", p.Container.Image),
+			}
 		}
 		//解压镜像
 		if p.DecompressionImage {
+			bus <- BaseProcessEvent{
+				p:   podProc,
+				cp:  p,
+				msg: fmt.Sprintf("start DecompressionImage %s to workdir %s", p.Container.Image, p.Workdir),
+			}
 			if err := p.im.decompressionImage(ctx, p.Container.Image, p.Workdir); err != nil {
+				bus <- BaseProcessEvent{
+					p:   podProc,
+					err: err,
+					cp:  p,
+					msg: fmt.Sprintf("DecompressionImage %s to workdir %s error", p.Container.Image, p.Workdir),
+				}
 				return err
+			}
+		} else {
+			bus <- BaseProcessEvent{
+				p:   podProc,
+				cp:  p,
+				msg: fmt.Sprintf("DecompressionImage %s to workdir %s finish", p.Container.Image, p.Workdir),
 			}
 		}
 		//TODO:获取configmap和secret
+		getConfigMaps(podProc.Pod)
+		getSecrets(podProc.Pod)
 
 		if p.Pid == 0 && !p.Dead {
 			//TODO:启动进程,设置环境变量
@@ -320,26 +363,36 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			cmd.Stderr = os.Stderr
 			err := cmd.Start()
 			if err != nil {
+				bus <- BaseProcessEvent{
+					p:   podProc,
+					err: err,
+					cp:  p,
+					msg: fmt.Sprintf("start cmd error image:%s,workdir:%s,cmd:%s,args:%v", p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
+				}
 				return err
 			}
 
-			//TODO:产生process启动的事件(PID)
-			//存储进程信息
-			//p.Pid = cmd.Process.Pid
-			//if err := p.pm.Put(p); err != nil {
-			//	return err
-			//}
-			//defer func() {
-			//	if err := p.pm.Delete(p); err != nil {
-			//		panic(err)
-			//	}
-			//}()
-			//return cmd.Wait()
+			bus <- ContainerProcessRun{
+				ProcessEvent: BaseProcessEvent{
+					p:   podProc,
+					cp:  p,
+					msg: fmt.Sprintf("start cmd with Pid %v image:%s,workdir:%s,cmd:%s,args:%v", cmd.Process.Pid, p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
+				},
+				pid:   cmd.Process.Pid,
+				index: index,
+			}
 		}
 		startHealthCheck(ctx, p)
 		//等待结束,并发送进程结束事件
 		waitProcessDead(ctx, p)
-		//TODO:发送结束事件
+		bus <- ContainerProcessFinish{
+			ProcessEvent: BaseProcessEvent{
+				p:   podProc,
+				cp:  p,
+				msg: fmt.Sprintf("run cmd end image:%s", p.Container.Image),
+			},
+			index: index,
+		}
 		return nil
 	}
 	if p.Sync {
@@ -437,4 +490,77 @@ func getContainerProcessWorkDir(workdir string, pod *corev1.Pod, c corev1.Contai
 
 func dockerImageName(image string) string {
 	return dockershim.DockerImageIDPrefix + image
+}
+
+func getConfigMaps(pod *corev1.Pod) map[string]interface{} {
+	m := make(map[string]interface{})
+	for _, volume := range pod.Spec.Volumes {
+		if volume.ConfigMap != nil {
+			m[volume.ConfigMap.Name] = nil
+		}
+	}
+	for _, c := range pod.Spec.InitContainers {
+		for _, envVar := range c.Env {
+			if envVar.ValueFrom != nil && envVar.ValueFrom.ConfigMapKeyRef != nil {
+				m[envVar.ValueFrom.ConfigMapKeyRef.Name] = nil
+			}
+		}
+		for _, s := range c.EnvFrom {
+			if s.ConfigMapRef != nil {
+				m[s.ConfigMapRef.Name] = nil
+			}
+		}
+	}
+	for _, c := range pod.Spec.Containers {
+		for _, envVar := range c.Env {
+			if envVar.ValueFrom != nil && envVar.ValueFrom.ConfigMapKeyRef != nil {
+				m[envVar.ValueFrom.ConfigMapKeyRef.Name] = nil
+			}
+		}
+		for _, s := range c.EnvFrom {
+			if s.ConfigMapRef != nil {
+				m[s.ConfigMapRef.Name] = nil
+			}
+		}
+	}
+	return m
+}
+
+func getSecrets(pod *corev1.Pod) map[string]interface{} {
+	m := make(map[string]interface{})
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Secret != nil {
+			m[volume.Secret.SecretName] = nil
+		}
+	}
+	for _, c := range pod.Spec.InitContainers {
+		for _, envVar := range c.Env {
+			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+				m[envVar.ValueFrom.SecretKeyRef.Name] = nil
+			}
+		}
+		for _, s := range c.EnvFrom {
+			if s.SecretRef != nil {
+				m[s.SecretRef.Name] = nil
+			}
+		}
+	}
+	for _, c := range pod.Spec.Containers {
+		for _, envVar := range c.Env {
+			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+				m[envVar.ValueFrom.SecretKeyRef.Name] = nil
+			}
+		}
+		for _, s := range c.EnvFrom {
+			if s.SecretRef != nil {
+				m[s.SecretRef.Name] = nil
+			}
+		}
+	}
+	if pod.Spec.ImagePullSecrets != nil {
+		for _, s := range pod.Spec.ImagePullSecrets {
+			m[s.Name] = nil
+		}
+	}
+	return m
 }

@@ -37,8 +37,9 @@ type Provider struct {
 	startTime  time.Time
 	config     *config
 
-	podHandler     *PodEventHandler
-	nodeHandler    *NodeEventHandler
+	podHandler  *PodEventHandler
+	nodeHandler *NodeEventHandler
+
 	imageManager   *ImageManager
 	db             *bitcask.Bitcask
 	processManager *ProcessManager
@@ -161,7 +162,7 @@ func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, con
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, namespace, nameKey, podName, nodeNameKey, p.initConfig.NodeName)
 
-	//TODO:实现
+	//TODO:实现,读取log
 	return nil, fmt.Errorf("unsupport GetContainerLogs")
 }
 
@@ -245,9 +246,19 @@ func (p *Provider) start(ctx context.Context) error {
 			db.Close()
 		}
 	}()
+
 	p.db = db
 	p.imageManager = NewImageManager(filepath.Join(p.config.WorkDir, ImagePath), db)
-	p.processManager = NewProcessManager(filepath.Join(p.config.WorkDir, ContainerPath), db, p.imageManager)
+	record := p.initConfig.ResourceManager.GetRecord(ctx, "", "ProcessManager")
+	p.processManager = NewProcessManager(filepath.Join(p.config.WorkDir, ContainerPath), db, p.imageManager, record)
+	p.podHandler = &PodEventHandler{
+		HostIp: p.initConfig.InternalIP,
+		events: make(chan ProcessEvent),
+	}
+	p.nodeHandler = &NodeEventHandler{
+		p:      p,
+		events: make(chan ProcessEvent),
+	}
 	return nil
 }
 

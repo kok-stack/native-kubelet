@@ -2,40 +2,47 @@ module github.com/kok-stack/native-kubelet
 
 go 1.15
 
+
 require (
 	contrib.go.opencensus.io/exporter/jaeger v0.1.0
 	contrib.go.opencensus.io/exporter/ocagent v0.4.12
 	github.com/bombsimon/logrusr v1.0.0
-	github.com/containers/common v0.33.4
-	github.com/containers/image/v5 v5.10.2
-	github.com/containers/ocicrypt v1.0.3
-	github.com/containers/storage v1.27.0 // indirect
+	github.com/checkpoint-restore/go-criu/v4 v4.1.0 // indirect
+	github.com/cilium/ebpf v0.4.0 // indirect
+	github.com/containerd/console v1.0.1 // indirect
+	github.com/containerd/containerd v1.4.4
+	github.com/containers/image/v5 v5.10.5
+	github.com/coreos/go-systemd/v22 v22.3.0 // indirect
 	github.com/docker/spdystream v0.0.0-20170912183627-bc6354cbbc29 // indirect
 	github.com/elazarl/goproxy v0.0.0-20190421051319-9d40249d3c2f // indirect
 	github.com/elazarl/goproxy/ext v0.0.0-20190711103511-473e67f1d7d2 // indirect
 	github.com/flytam/filenamify v1.0.0
-	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/google/go-cmp v0.5.2
-	github.com/gorilla/mux v1.8.0
+	github.com/golang/protobuf v1.5.1 // indirect
+	github.com/google/go-cmp v0.5.5
+	github.com/gorilla/mux v1.7.4
 	github.com/mitchellh/go-homedir v1.1.0
-	github.com/moby/term v0.0.0-20201110203204-bea5bbe245bf // indirect
+	github.com/moby/sys/mountinfo v0.4.1 // indirect
+	github.com/mrunalp/fileutils v0.5.0 // indirect
+	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.2-0.20190823105129-775207bd45b6
 	github.com/pkg/errors v0.9.1
-	github.com/proglottis/gpgme v0.1.1 // indirect
 	github.com/prologic/bitcask v0.3.10
 	github.com/prometheus/client_golang v1.1.0
-	github.com/sirupsen/logrus v1.8.0
-	github.com/spf13/cobra v1.1.1
+	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/shirou/gopsutil v0.0.0-20180427012116-c95755e4bcd7
+	github.com/sirupsen/logrus v1.8.1
+	github.com/spf13/cobra v0.0.7
 	github.com/spf13/pflag v1.0.5
+	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
+	github.com/urfave/cli v1.22.5 // indirect
+	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
 	go.opencensus.io v0.22.0
 	go.uber.org/goleak v1.1.10
-	golang.org/x/crypto v0.0.0-20201221181555-eec23a3978ad // indirect
-	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
-	golang.org/x/sys v0.0.0-20201218084310-7d0127a74742
+	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
+	golang.org/x/sys v0.0.0-20210324051608-47abb6519492
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0
-	gopkg.in/yaml.v2 v2.4.0 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gotest.tools v2.2.0+incompatible
-	gotest.tools/v3 v3.0.3 // indirect
 	k8s.io/api v0.18.6
 	k8s.io/apimachinery v0.18.6
 	k8s.io/apiserver v0.18.4
@@ -89,3 +96,7 @@ replace k8s.io/client-go => k8s.io/client-go v0.18.4
 replace k8s.io/kubectl => k8s.io/kubectl v0.18.4
 
 replace k8s.io/api => k8s.io/api v0.18.4
+
+replace github.com/containerd/containerd => github.com/containerd/containerd v1.0.2
+
+replace github.com/containers/image/v5 => github.com/containers/image/v5 v5.4.3

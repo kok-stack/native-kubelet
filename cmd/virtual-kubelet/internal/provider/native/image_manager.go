@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/containerd/containerd/images"
-	"github.com/containers/common/pkg/retry"
 	cc "github.com/containers/image/v5/copy"
 	"github.com/containers/image/v5/directory"
 	"github.com/containers/image/v5/docker/archive"
@@ -136,18 +135,18 @@ check:
 	}
 	defer pulling.f.Close()
 
-	err = retry.RetryIfNecessary(subCtx, func() error {
-		_, err = cc.Image(subCtx, policyContext, destRef, srcRef, &cc.Options{
-			ReportWriter:       pulling.f,
-			SourceCtx:          sourceCtx,
-			DestinationCtx:     destinationCtx,
-			ImageListSelection: cc.CopySystemImage,
-		})
-		return err
-	}, &retry.RetryOptions{
-		MaxRetry: opts.RetryCount,
-		Delay:    time.Microsecond * 100,
+	//err = retry.RetryIfNecessary(subCtx, func() error {
+	_, err = cc.Image(subCtx, policyContext, destRef, srcRef, &cc.Options{
+		ReportWriter:       pulling.f,
+		SourceCtx:          sourceCtx,
+		DestinationCtx:     destinationCtx,
+		ImageListSelection: cc.CopySystemImage,
 	})
+	//return err
+	//}, &retry.RetryOptions{
+	//	MaxRetry: opts.RetryCount,
+	//	Delay:    time.Microsecond * 100,
+	//})
 	if err != nil {
 		return err
 	}
@@ -183,18 +182,21 @@ func (m *ImageManager) decompressionImage(ctx context.Context, image string, wor
 	destinationCtx := &types.SystemContext{}
 
 	//解压镜像
-	if err := retry.RetryIfNecessary(ctx, func() error {
-		_, err := cc.Image(ctx, policyContext, destRef, srcRef, &cc.Options{
-			ReportWriter:       os.Stdout,
-			SourceCtx:          sourceCtx,
-			DestinationCtx:     destinationCtx,
-			ImageListSelection: cc.CopySystemImage,
-		})
-		return err
-	}, &retry.RetryOptions{
-		MaxRetry: 0,
-		Delay:    time.Microsecond * 100,
-	}); err != nil {
+	//if err := retry.RetryIfNecessary(ctx, func() error {
+	_, err = cc.Image(ctx, policyContext, destRef, srcRef, &cc.Options{
+		ReportWriter:       os.Stdout,
+		SourceCtx:          sourceCtx,
+		DestinationCtx:     destinationCtx,
+		ImageListSelection: cc.CopySystemImage,
+	})
+	//return err
+	//}, &retry.RetryOptions{
+	//	MaxRetry: 0,
+	//	Delay:    time.Microsecond * 100,
+	//}); err != nil {
+	//	return err
+	//}
+	if err != nil {
 		return err
 	}
 	//解压 "层"

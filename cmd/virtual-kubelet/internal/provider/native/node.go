@@ -8,8 +8,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	corev1listers "k8s.io/client-go/listers/core/v1"
 )
 
 func totalResourceList(rs []corev1.ResourceList) corev1.ResourceList {
@@ -44,41 +42,10 @@ func sub(total corev1.ResourceList, item corev1.ResourceList) {
 }
 
 type NodeEventHandler struct {
-	ctx            context.Context
 	p              *Provider
-	node           *v1.Node
 	notifyNodeFunc func(*v1.Node)
-	updateNode     chan struct{}
-	downNodeLister corev1listers.NodeLister
-	downPodLister  corev1listers.PodLister
-}
-
-func (n *NodeEventHandler) OnAdd(obj interface{}) {
-	_, span := trace.StartSpan(n.ctx, "NodeEventHandler.OnAdd")
-	defer span.End()
-	node := obj.(*v1.Node)
-	add(n.node.Status.Capacity, node.Status.Capacity)
-	add(n.node.Status.Allocatable, node.Status.Allocatable)
-
-	n.updateNode <- struct{}{}
-}
-
-func (n *NodeEventHandler) OnDelete(obj interface{}) {
-	_, span := trace.StartSpan(n.ctx, "NodeEventHandler.OnDelete")
-	defer span.End()
-	node := obj.(*v1.Node)
-
-	sub(n.node.Status.Capacity, node.Status.Capacity)
-	sub(n.node.Status.Allocatable, node.Status.Allocatable)
-
-	n.updateNode <- struct{}{}
-}
-
-func (n *NodeEventHandler) OnUpdate(oldObj, newObj interface{}) {
-	_, span := trace.StartSpan(n.ctx, "NodeEventHandler.OnUpdate")
-	defer span.End()
-	n.OnAdd(newObj)
-	n.OnDelete(oldObj)
+	node           *v1.Node
+	events         chan ProcessEvent
 }
 
 func (n *NodeEventHandler) start(ctx context.Context) {
@@ -86,9 +53,8 @@ func (n *NodeEventHandler) start(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				close(n.updateNode)
 				return
-			case <-n.updateNode:
+			case <-n.events:
 				log.G(ctx).Debug("开始更新node status的 Allocatable/Capacity")
 
 				n.notifyNodeFunc(n.node)
@@ -120,70 +86,9 @@ func (n *NodeEventHandler) configureNode(ctx context.Context, node *v1.Node) {
 	node.ObjectMeta.Labels["node.kubernetes.io/exclude-from-external-load-balancers"] = "true"
 
 	n.node = node
-	n.initResourceList(ctx)
 	span.Logger().Debug("configureNode finish")
 }
 
-func (n *NodeEventHandler) initResourceList(ctx context.Context) {
-	subCtx, span := trace.StartSpan(ctx, "NodeEventHandler.initResourceList")
-	defer span.End()
-	nodes, err := n.downNodeLister.List(labels.Nothing())
-	if err != nil {
-		log.G(subCtx).Warnf("获取down集群Node出错", err)
-		return
-	}
-
-	allocates := make([]v1.ResourceList, len(nodes))
-	capacitys := make([]v1.ResourceList, len(nodes))
-	for i, n := range nodes {
-		allocates[i] = n.Status.Allocatable
-		capacitys[i] = n.Status.Capacity
-	}
-	n.node.Status.Allocatable = totalResourceList(allocates)
-	n.node.Status.Capacity = totalResourceList(allocates)
-	list, err := n.downPodLister.List(labels.Nothing())
-	if err != nil {
-		log.G(subCtx).Warnf("获取down集群Pods出错", err)
-		return
-	}
-	for _, pod := range list {
-		for _, c := range pod.Spec.InitContainers {
-			sub(n.node.Status.Allocatable, c.Resources.Requests)
-		}
-		for _, c := range pod.Spec.Containers {
-			sub(n.node.Status.Allocatable, c.Resources.Requests)
-		}
-	}
-	log.G(subCtx).Debug("初始化node ResourceList完成")
-}
-
-func (n *NodeEventHandler) OnPodAdd(pod *v1.Pod) {
-	_, span := trace.StartSpan(n.ctx, "NodeEventHandler.OnPodAdd")
-	defer span.End()
-	for _, c := range pod.Spec.InitContainers {
-		add(n.node.Status.Allocatable, c.Resources.Requests)
-	}
-	for _, c := range pod.Spec.Containers {
-		add(n.node.Status.Allocatable, c.Resources.Requests)
-	}
-	n.updateNode <- struct{}{}
-}
-
-func (n *NodeEventHandler) OnPodDelete(pod *v1.Pod) {
-	_, span := trace.StartSpan(n.ctx, "NodeEventHandler.OnPodDelete")
-	defer span.End()
-	for _, c := range pod.Spec.InitContainers {
-		sub(n.node.Status.Allocatable, c.Resources.Requests)
-	}
-	for _, c := range pod.Spec.Containers {
-		sub(n.node.Status.Allocatable, c.Resources.Requests)
-	}
-	n.updateNode <- struct{}{}
-}
-
-// nodeConditions creates a slice of node conditions representing a
-// kubelet in perfect health. These four conditions are the ones which virtual-kubelet
-// sets as Unknown when a Ping fails.
 func nodeConditions() []corev1.NodeCondition {
 	return []corev1.NodeCondition{
 		{

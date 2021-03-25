@@ -16,13 +16,15 @@ package manager
 
 import (
 	"context"
+	"github.com/kok-stack/native-kubelet/log"
 	v1 "k8s.io/api/core/v1"
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
-
-	"github.com/kok-stack/native-kubelet/log"
+	"k8s.io/client-go/tools/record"
 )
 
 // ResourceManager acts as a passthrough to a cache (lister) for pods assigned to the current node.
@@ -95,4 +97,11 @@ func (rm *ResourceManager) GetSecret(name, namespace string) (*v1.Secret, error)
 // ListServices retrieves the list of services from Kubernetes.
 func (rm *ResourceManager) ListServices() ([]*v1.Service, error) {
 	return rm.serviceLister.List(labels.Everything())
+}
+
+func (rm *ResourceManager) GetRecord(ctx context.Context, namespace string, component string) record.EventRecorder {
+	eb := record.NewBroadcaster()
+	eb.StartLogging(log.G(ctx).Infof)
+	eb.StartRecordingToSink(&corev1client.EventSinkImpl{Interface: rm.client.CoreV1().Events(namespace)})
+	return eb.NewRecorder(scheme.Scheme, v1.EventSource{Component: component})
 }

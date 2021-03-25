@@ -2,12 +2,15 @@ package native
 
 import (
 	"context"
+	"fmt"
 	"github.com/kok-stack/native-kubelet/trace"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	stats "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 	"k8s.io/metrics/pkg/apis/metrics/v1beta1"
-	"strings"
+	"strconv"
+	"time"
 )
 
 func (p *Provider) GetStatsSummary(ctx context.Context) (*stats.Summary, error) {
@@ -85,126 +88,10 @@ func convert2PodStats(metric *v1beta1.PodMetrics) *stats.PodStats {
 	return stat
 }
 
-func getConfigMaps(pod *v1.Pod) map[string]interface{} {
-	m := make(map[string]interface{})
-	for _, volume := range pod.Spec.Volumes {
-		if volume.ConfigMap != nil {
-			m[volume.ConfigMap.Name] = nil
-		}
-	}
-	for _, c := range pod.Spec.InitContainers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.ConfigMapKeyRef != nil {
-				m[envVar.ValueFrom.ConfigMapKeyRef.Name] = nil
-			}
-		}
-		for _, s := range c.EnvFrom {
-			if s.ConfigMapRef != nil {
-				m[s.ConfigMapRef.Name] = nil
-			}
-		}
-	}
-	for _, c := range pod.Spec.Containers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.ConfigMapKeyRef != nil {
-				m[envVar.ValueFrom.ConfigMapKeyRef.Name] = nil
-			}
-		}
-		for _, s := range c.EnvFrom {
-			if s.ConfigMapRef != nil {
-				m[s.ConfigMapRef.Name] = nil
-			}
-		}
-	}
-	return m
-}
-
-func getSecrets(pod *v1.Pod) map[string]interface{} {
-	m := make(map[string]interface{})
-	for _, volume := range pod.Spec.Volumes {
-		if volume.Secret != nil {
-			m[volume.Secret.SecretName] = nil
-		}
-	}
-	for _, c := range pod.Spec.InitContainers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
-				m[envVar.ValueFrom.SecretKeyRef.Name] = nil
-			}
-		}
-		for _, s := range c.EnvFrom {
-			if s.SecretRef != nil {
-				m[s.SecretRef.Name] = nil
-			}
-		}
-	}
-	for _, c := range pod.Spec.Containers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
-				m[envVar.ValueFrom.SecretKeyRef.Name] = nil
-			}
-		}
-		for _, s := range c.EnvFrom {
-			if s.SecretRef != nil {
-				m[s.SecretRef.Name] = nil
-			}
-		}
-	}
-	if pod.Spec.ImagePullSecrets != nil {
-		for _, s := range pod.Spec.ImagePullSecrets {
-			m[s.Name] = nil
-		}
-	}
-	return m
-}
-
 type PodEventHandler struct {
-	ctx          context.Context
-	p            *Provider
-	notifyFunc   func(*v1.Pod)
-	podUpdateCh  chan *v1.Pod
-	nodeUpdateCh chan struct{}
-	nodeHandler  *NodeEventHandler
-}
-
-func (p *PodEventHandler) OnAdd(obj interface{}) {
-	_, span := trace.StartSpan(p.ctx, "PodEventHandler.OnAdd")
-	defer span.End()
-	downPod := obj.(*v1.Pod)
-	upPod, err := p.p.initConfig.ResourceManager.GetPod(downPod.Namespace, downPod.Name)
-	if err != nil {
-		println(err.Error())
-		return
-	}
-	if upPod == nil {
-		return
-	}
-	upPod = upPod.DeepCopy()
-	upPod.Spec = downPod.Spec
-	upPod.Status = downPod.Status
-	p.podUpdateCh <- upPod
-	p.nodeHandler.OnPodAdd(upPod)
-}
-
-func (p *PodEventHandler) OnUpdate(oldObj, newObj interface{}) {
-	_, span := trace.StartSpan(p.ctx, "PodEventHandler.OnUpdate")
-	defer span.End()
-	p.OnAdd(newObj)
-	oldPod := oldObj.(*v1.Pod)
-	p.nodeHandler.OnPodDelete(oldPod)
-}
-
-func (p *PodEventHandler) OnDelete(obj interface{}) {
-	_, span := trace.StartSpan(p.ctx, "PodEventHandler.OnDelete")
-	defer span.End()
-	downPod := obj.(*v1.Pod)
-	//err := p.p.initConfig.ResourceManager.DeletePod(p.ctx, downPod.GetNamespace(), downPod.GetName())
-	//if (err != nil && errors2.IsNotFound(err)) || err == nil {
-	//	return
-	//} else {
-	//	println(err.Error())
-	//}
-	p.nodeHandler.OnPodDelete(downPod)
+	notifyFunc func(*v1.Pod)
+	events     chan ProcessEvent
+	HostIp     string
 }
 
 func (p *PodEventHandler) start(ctx context.Context) {
@@ -212,17 +99,136 @@ func (p *PodEventHandler) start(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				close(p.podUpdateCh)
 				return
-			case t := <-p.podUpdateCh:
-				p.notifyFunc(t)
+			case e := <-p.events:
+				pod := e.getPodProcess().Pod
+				switch e.(type) {
+				case PodProcessStart:
+					event := e.(PodProcessStart)
+					p.OnPodStart(event, pod)
+				case ContainerProcessError:
+					event := e.(ContainerProcessError)
+					p.OnError(event, pod)
+				case ContainerProcessRun:
+					event := e.(ContainerProcessRun)
+					p.OnContainerRun(event, pod)
+				case ContainerProcessFinish:
+					event := e.(ContainerProcessFinish)
+					p.OnFinish(event, pod)
+				case ContainerProcessNext:
+					event := e.(ContainerProcessNext)
+					p.OnNext(event, pod)
+				default:
+					fmt.Println(e)
+				}
+				p.notifyFunc(pod)
 			}
 		}
 	}()
 }
 
-func isDefaultSecret(secretName string) bool {
-	return strings.HasPrefix(secretName, defaultTokenNamePrefix)
+//pod start--> [OnContainerRun-->OnError/OnFinish]-->OnNext
+func (p *PodEventHandler) OnError(event ContainerProcessError, pod *v1.Pod) {
+	status := pod.Status
+	status.Phase = v1.PodFailed
+	t := metav1.Time{time.Now()}
+	status.Conditions = append(status.Conditions, v1.PodCondition{
+		Type:               v1.ContainersReady,
+		Status:             v1.ConditionFalse,
+		LastProbeTime:      t,
+		LastTransitionTime: t,
+		Reason:             "ContainerProcessError",
+		Message:            event.getMsg(),
+	})
 }
 
-const defaultTokenNamePrefix = "default-token"
+func (p *PodEventHandler) OnContainerRun(event ContainerProcessRun, pod *v1.Pod) {
+	status := pod.Status
+	t := metav1.Time{time.Now()}
+	index := 0
+	var c v1.Container
+	initLen := len(pod.Spec.InitContainers)
+	started := true
+
+	if initLen < event.index {
+		c = pod.Spec.InitContainers[event.index]
+		status.InitContainerStatuses = append(status.InitContainerStatuses, v1.ContainerStatus{
+			Name: c.Name,
+			State: v1.ContainerState{
+				Running: &v1.ContainerStateRunning{StartedAt: t},
+			},
+			LastTerminationState: v1.ContainerState{
+				Running: &v1.ContainerStateRunning{StartedAt: t},
+			},
+			Ready:        false,
+			RestartCount: 0,
+			Image:        c.Image,
+			ImageID:      c.Image,
+			ContainerID:  strconv.Itoa(event.pid),
+			Started:      &started,
+		})
+	} else {
+		index = event.index - initLen
+		c = pod.Spec.Containers[index]
+		status.ContainerStatuses = append(status.ContainerStatuses, v1.ContainerStatus{
+			Name: c.Name,
+			State: v1.ContainerState{
+				Running: &v1.ContainerStateRunning{StartedAt: t},
+			},
+			LastTerminationState: v1.ContainerState{
+				Running: &v1.ContainerStateRunning{StartedAt: t},
+			},
+			Ready:        false,
+			RestartCount: 0,
+			Image:        c.Image,
+			ImageID:      c.Image,
+			ContainerID:  strconv.Itoa(event.pid),
+			Started:      &started,
+		})
+	}
+}
+
+func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
+	status := pod.Status
+	index := 0
+	initLen := len(pod.Spec.InitContainers)
+	t := metav1.Time{Time: time.Now()}
+
+	if initLen < event.index {
+		index = event.index
+		containerStatus := status.InitContainerStatuses[index]
+		containerStatus.State.Terminated = &v1.ContainerStateTerminated{
+			//ExitCode:    0,
+			//Signal:      0,
+			//Reason:      "",
+			//Message:     "",
+			StartedAt:   containerStatus.State.Running.StartedAt,
+			FinishedAt:  t,
+			ContainerID: strconv.Itoa(event.pid),
+		}
+	} else {
+		index = event.index - initLen
+		containerStatus := status.ContainerStatuses[index]
+		containerStatus.State.Terminated = &v1.ContainerStateTerminated{
+			//ExitCode:    0,
+			//Signal:      0,
+			StartedAt:   containerStatus.State.Running.StartedAt,
+			FinishedAt:  t,
+			ContainerID: strconv.Itoa(event.pid),
+		}
+	}
+}
+
+func (p *PodEventHandler) OnNext(event ContainerProcessNext, pod *v1.Pod) {
+
+}
+
+func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {
+	status := pod.Status
+	status.Phase = v1.PodRunning
+	status.HostIP = p.HostIp
+	status.PodIP = p.HostIp
+	status.PodIPs = []v1.PodIP{{IP: p.HostIp}}
+	status.StartTime = &metav1.Time{Time: event.t}
+	status.QOSClass = v1.PodQOSGuaranteed
+}
