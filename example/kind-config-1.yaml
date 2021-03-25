@@ -1,0 +1,13 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
+#  disableDefaultCNI: true
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.19.1@sha256:98cf5288864662e37115e362b23e4369c8c4a408f99cbc06e58ac30ddc721600
+    extraPortMappings:
+      - containerPort: 6443
+        hostPort: 16443
+        listenAddress: "0.0.0.0"

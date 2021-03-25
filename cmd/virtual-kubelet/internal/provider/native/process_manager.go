@@ -50,7 +50,7 @@ func NewProcessManager(workdir string, processDb *bitcask.Bitcask, im *ImageMana
 	return &ProcessManager{workdir: workdir, processDb: processDb, im: im, record: record}
 }
 
-var bus chan ProcessEvent
+var bus = make(chan ProcessEvent, 0)
 var subscribes = make([]chan ProcessEvent, 0)
 
 func AddSubscribe(ch chan ProcessEvent) {
@@ -60,11 +60,14 @@ func AddSubscribe(ch chan ProcessEvent) {
 func (m *ProcessManager) Start(ctx context.Context) error {
 	//分发事件
 	go func() {
-		select {
-		case <-ctx.Done():
-		case event := <-bus:
-			for _, v := range subscribes {
-				v <- event
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event := <-bus:
+				for _, v := range subscribes {
+					v <- event
+				}
 			}
 		}
 	}()
@@ -72,12 +75,16 @@ func (m *ProcessManager) Start(ctx context.Context) error {
 		events := make(chan ProcessEvent)
 		AddSubscribe(events)
 
-		select {
-		case <-ctx.Done():
-		case event := <-events:
-			m.recordEvent(event)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event := <-events:
+				fmt.Println("ProcessManager收到消息====================")
+				m.recordEvent(event)
 
-			m.Put(event.getPodProcess())
+				m.Put(event.getPodProcess())
+			}
 		}
 	}()
 
@@ -102,6 +109,7 @@ func (m *ProcessManager) RunPod(ctx context.Context, p *corev1.Pod) error {
 	if err != nil {
 		return err
 	}
+	fmt.Println(proc, "=====================")
 	if err := m.Put(proc); err != nil {
 		return err
 	}
@@ -126,16 +134,20 @@ func (p *PodProcess) Key() []byte {
 }
 
 func (p *PodProcess) run(ctx context.Context) {
+	fmt.Println("================开始run pod")
 	go func() {
 		for {
+			fmt.Println("================开始run pod,当前index", p.Index)
 			if p.Index == 0 {
 				bus <- PodProcessStart{ProcessEvent: BaseProcessEvent{p: p, cp: nil}, t: time.Now()}
+				fmt.Println("================发送PodProcessStart事件", p.Index)
 			}
 			if p.Index >= len(p.ProcessChain) {
 				break
 			}
 			subCtx := context.WithValue(context.WithValue(ctx, podProcessKey, p), indexKey, p.Index)
 			cp := p.ProcessChain[p.Index]
+			fmt.Println("================启动ContainerProcess", cp, p.Index)
 			err := cp.run(subCtx)
 			if err != nil {
 				bus <- ContainerProcessError{ProcessEvent: BaseProcessEvent{p: p, cp: cp, err: err, msg: fmt.Sprintf("run container process error,index:%v", p.Index)}, index: p.Index}
@@ -170,7 +182,7 @@ func (p *PodProcess) getRuningContainerProcess() []*ContainerProcess {
 		if i > p.Index {
 			continue
 		}
-		if cp.Dead {
+		if cp.PidDead {
 			continue
 		}
 		result = append(result, cp)
@@ -190,10 +202,10 @@ type ContainerProcess struct {
 	RestartPolicy corev1.RestartPolicy `json:"restart_policy"`
 
 	//状态信息
-	Pid                int  `json:"pid"`
-	PullImage          bool `json:"pull_image"`
-	DecompressionImage bool `json:"decompression_image"`
-	Dead               bool `json:"dead"`
+	Pid           int  `json:"pid"`
+	ImagePulled   bool `json:"image_pulled"`
+	ImageUnzipped bool `json:"image_unzipped"`
+	PidDead       bool `json:"pid_dead"`
 
 	im *ImageManager   `json:"-"`
 	pm *ProcessManager `json:"-"`
@@ -214,20 +226,21 @@ func (m *ProcessManager) convertPod2Process(ctx context.Context, p *corev1.Pod) 
 		Pod:       p,
 		pm:        m,
 	}
-	proc.ProcessChain = make([]*ContainerProcess, len(p.Spec.InitContainers)+len(p.Spec.Containers))
-	for _, c := range p.Spec.InitContainers {
+	initLen := len(p.Spec.InitContainers)
+	proc.ProcessChain = make([]*ContainerProcess, initLen+len(p.Spec.Containers))
+	for i, c := range p.Spec.InitContainers {
 		dir, err = getContainerProcessWorkDir(m.workdir, p, c)
 		if err != nil {
 			return nil, err
 		}
-		proc.ProcessChain = append(proc.ProcessChain, NewProcess(p, c, dir, m.im, m, false))
+		proc.ProcessChain[i] = NewProcess(p, c, dir, m.im, m, true)
 	}
-	for _, c := range p.Spec.Containers {
+	for i, c := range p.Spec.Containers {
 		dir, err = getContainerProcessWorkDir(m.workdir, p, c)
 		if err != nil {
 			return nil, err
 		}
-		proc.ProcessChain = append(proc.ProcessChain, NewProcess(p, c, dir, m.im, m, true))
+		proc.ProcessChain[i+initLen] = NewProcess(p, c, dir, m.im, m, false)
 	}
 	return proc, nil
 }
@@ -290,70 +303,78 @@ func (m *ProcessManager) getPods(ctx context.Context) ([]*corev1.Pod, error) {
 func (m *ProcessManager) recordEvent(event ProcessEvent) {
 	var eventtype string
 	if event.getError() != nil {
-		eventtype = corev1.EventTypeNormal
-	} else {
 		eventtype = corev1.EventTypeWarning
+	} else {
+		eventtype = corev1.EventTypeNormal
 	}
-	m.record.Event(event.getPodProcess().Pod, eventtype, "", event.getMsg())
+	m.record.Event(event.getPodProcess().Pod, eventtype, "ProcessEvent", event.getMsg())
 }
 
 func (p *ContainerProcess) run(ctx context.Context) error {
 	f := func() error {
 		podProc := ctx.Value(podProcessKey).(*PodProcess)
 		index := ctx.Value(indexKey).(int)
-
-		if p.PullImage {
+		fmt.Println("pull 镜像", dockerImageName(p.Container.Image), p.ImagePulled)
+		if !p.ImagePulled {
+			fmt.Println("发送 pull 镜像 事件", dockerImageName(p.Container.Image))
 			bus <- BaseProcessEvent{
 				p:   podProc,
 				cp:  p,
 				msg: fmt.Sprintf("start pull image %s", p.Container.Image),
 			}
+			fmt.Println("发送 pull 镜像 事件完成", dockerImageName(p.Container.Image))
 			if err := p.im.PullImage(ctx, PullImageOpts{
 				SrcImage: dockerImageName(p.Container.Image),
 				//DockerAuthConfig:            nil,
 				//DockerBearerRegistryToken:   "",
 				//DockerRegistryUserAgent:     "",
 				//DockerInsecureSkipTLSVerify: 0,
-				//Timeout:                     0,
+				Timeout: time.Hour,
 				//RetryCount:                  0,
 			}); err != nil {
+				bus <- BaseProcessEvent{
+					p:   podProc,
+					cp:  p,
+					err: err,
+					msg: fmt.Sprintf("image %s pull error", p.Container.Image),
+				}
 				return err
 			}
-		} else {
-			bus <- BaseProcessEvent{
-				p:   podProc,
-				cp:  p,
-				msg: fmt.Sprintf("image %s pull finish", p.Container.Image),
-			}
+			//TODO:镜像已更新设置
+		}
+		bus <- BaseProcessEvent{
+			p:   podProc,
+			cp:  p,
+			msg: fmt.Sprintf("image %s pull finish", p.Container.Image),
 		}
 		//解压镜像
-		if p.DecompressionImage {
+		fmt.Println("解压 镜像", p.Workdir)
+		if !p.ImageUnzipped {
 			bus <- BaseProcessEvent{
 				p:   podProc,
 				cp:  p,
-				msg: fmt.Sprintf("start DecompressionImage %s to workdir %s", p.Container.Image, p.Workdir),
+				msg: fmt.Sprintf("start ImageUnzipped %s to workdir %s", p.Container.Image, p.Workdir),
 			}
 			if err := p.im.decompressionImage(ctx, p.Container.Image, p.Workdir); err != nil {
 				bus <- BaseProcessEvent{
 					p:   podProc,
 					err: err,
 					cp:  p,
-					msg: fmt.Sprintf("DecompressionImage %s to workdir %s error", p.Container.Image, p.Workdir),
+					msg: fmt.Sprintf("ImageUnzipped %s to workdir %s error %v", p.Container.Image, p.Workdir, err),
 				}
 				return err
 			}
-		} else {
-			bus <- BaseProcessEvent{
-				p:   podProc,
-				cp:  p,
-				msg: fmt.Sprintf("DecompressionImage %s to workdir %s finish", p.Container.Image, p.Workdir),
-			}
+		}
+		bus <- BaseProcessEvent{
+			p:   podProc,
+			cp:  p,
+			msg: fmt.Sprintf("ImageUnzipped %s to workdir %s finish", p.Container.Image, p.Workdir),
 		}
 		//TODO:获取configmap和secret
 		getConfigMaps(podProc.Pod)
 		getSecrets(podProc.Pod)
-
-		if p.Pid == 0 && !p.Dead {
+		fmt.Println("运行进程", p.Container.Command)
+		if p.Pid == 0 && !p.PidDead {
 			//TODO:启动进程,设置环境变量
 			cmd := exec.Command(strings.Join(p.Container.Command, " "), p.Container.Args...)
 			cmd.Dir = filepath.Join(p.Workdir, p.Container.WorkingDir)
@@ -393,11 +414,14 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			},
 			index: index,
 		}
+		fmt.Println("运行进程完成", p.Container.Command)
 		return nil
 	}
 	if p.Sync {
+		fmt.Println("================启动ContainerProcess,同步")
 		return f()
 	} else {
+		fmt.Println("================启动ContainerProcess,异步")
 		go f()
 	}
 	return nil

@@ -75,6 +75,7 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 		return fmt.Errorf("Invalid source name %s: %v", name, err)
 	}
 	dest, _, err := imageDestDir(m.imagePath, opts.SrcImage)
+	//TODO:检查文件夹是否存在
 	if err != nil {
 		return err
 	}
@@ -135,6 +136,7 @@ check:
 	}
 	defer pulling.f.Close()
 
+	fmt.Println("====================1")
 	//err = retry.RetryIfNecessary(subCtx, func() error {
 	_, err = cc.Image(subCtx, policyContext, destRef, srcRef, &cc.Options{
 		ReportWriter:       pulling.f,
@@ -142,6 +144,10 @@ check:
 		DestinationCtx:     destinationCtx,
 		ImageListSelection: cc.CopySystemImage,
 	})
+	fmt.Println("====================2", err)
+	defer func() {
+		fmt.Println("pull 完成", dest)
+	}()
 	//return err
 	//}, &retry.RetryOptions{
 	//	MaxRetry: opts.RetryCount,

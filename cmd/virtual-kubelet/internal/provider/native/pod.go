@@ -95,12 +95,14 @@ type PodEventHandler struct {
 }
 
 func (p *PodEventHandler) start(ctx context.Context) {
+	AddSubscribe(p.events)
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case e := <-p.events:
+				fmt.Println("PodEventHandler收到消息====================")
 				pod := e.getPodProcess().Pod
 				switch e.(type) {
 				case PodProcessStart:
@@ -220,7 +222,7 @@ func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
 }
 
 func (p *PodEventHandler) OnNext(event ContainerProcessNext, pod *v1.Pod) {
-
+	fmt.Println(event, pod)
 }
 
 func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {

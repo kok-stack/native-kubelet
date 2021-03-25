@@ -255,11 +255,12 @@ func (p *Provider) start(ctx context.Context) error {
 		HostIp: p.initConfig.InternalIP,
 		events: make(chan ProcessEvent),
 	}
+	p.podHandler.start(ctx)
 	p.nodeHandler = &NodeEventHandler{
 		p:      p,
 		events: make(chan ProcessEvent),
 	}
-	return nil
+	return p.processManager.Start(ctx)
 }
 
 func NewProvider(ctx context.Context, cfg provider.InitConfig) (*Provider, error) {
