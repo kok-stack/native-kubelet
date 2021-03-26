@@ -46,12 +46,14 @@ type ImageManager struct {
 	imagePath string
 	pulling   sync.Map
 	imageDb   *bitcask.Bitcask
+	max       int
 }
 
-func NewImageManager(imagePath string, db *bitcask.Bitcask) *ImageManager {
+func NewImageManager(imagePath string, db *bitcask.Bitcask, max int) *ImageManager {
 	return &ImageManager{
 		imagePath: imagePath,
 		imageDb:   db,
+		max:       max,
 	}
 }
 
@@ -74,9 +76,12 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 	if err != nil {
 		return fmt.Errorf("Invalid source name %s: %v", name, err)
 	}
-	dest, _, err := imageDestDir(m.imagePath, opts.SrcImage)
-	//TODO:检查文件夹是否存在
+	dest, imageDir, err := imageDestDir(m.imagePath, opts.SrcImage)
 	if err != nil {
+		return err
+	}
+	//检查文件夹是否存在,不存在则创建
+	if err := createDestDir(filepath.Dir(imageDir)); err != nil {
 		return err
 	}
 	destRef, err := alltransports.ParseImageName(dest)
@@ -99,6 +104,9 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 	policyContext, err := signature.NewPolicyContext(policy)
 	if err != nil {
 		return err
+	}
+	if opts.Timeout == 0 {
+		opts.Timeout = time.Duration(m.max) * time.Second
 	}
 	subCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
@@ -130,6 +138,8 @@ check:
 	defer m.pulling.Delete(name)
 	logName := strconv.Itoa(rand.Intn(time.Now().Nanosecond()))
 
+	err = deleteExistImage(imageDir)
+
 	pulling.f, err = os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s", pullLogPrefix, logName)), os.O_CREATE, 0755)
 	if err != nil {
 		return err
@@ -159,7 +169,31 @@ check:
 	return m.imageDb.Put([]byte(name), []byte(dest))
 }
 
-func (m *ImageManager) decompressionImage(ctx context.Context, image string, workdir string) error {
+func deleteExistImage(dir string) error {
+	if err := os.Remove(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func createDestDir(dir string) error {
+	_, err := os.Stat(dir)
+	if err == nil {
+		return nil
+	}
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+			return err
+		}
+		return nil
+	}
+	return err
+}
+
+func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir string) error {
 	policy, err := signature.DefaultPolicy(nil)
 	if err != nil {
 		return err
@@ -170,6 +204,9 @@ func (m *ImageManager) decompressionImage(ctx context.Context, image string, wor
 	}
 	//解析workdir
 	imageDir := getImageWorkDir(workdir)
+	if err := createDestDir(imageDir); err != nil {
+		return err
+	}
 	destRef, err := directory.Transport.ParseReference(imageDir)
 	if err != nil {
 		return err

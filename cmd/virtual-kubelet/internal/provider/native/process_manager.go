@@ -151,7 +151,6 @@ func (p *PodProcess) run(ctx context.Context) {
 			err := cp.run(subCtx)
 			if err != nil {
 				bus <- ContainerProcessError{ProcessEvent: BaseProcessEvent{p: p, cp: cp, err: err, msg: fmt.Sprintf("run container process error,index:%v", p.Index)}, index: p.Index}
-				//TODO:record
 				continue
 			}
 			p.Index++
@@ -315,7 +314,8 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 		podProc := ctx.Value(podProcessKey).(*PodProcess)
 		index := ctx.Value(indexKey).(int)
 		fmt.Println("pull 镜像", dockerImageName(p.Container.Image), p.ImagePulled)
-		if !p.ImagePulled {
+		//根据镜像pull策略判断是否要pull镜像
+		if p.needPullImage() {
 			fmt.Println("发送 pull 镜像 事件", dockerImageName(p.Container.Image))
 			bus <- BaseProcessEvent{
 				p:   podProc,
@@ -329,7 +329,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 				//DockerBearerRegistryToken:   "",
 				//DockerRegistryUserAgent:     "",
 				//DockerInsecureSkipTLSVerify: 0,
-				Timeout: time.Hour,
+				//Timeout: time.Hour,
 				//RetryCount:                  0,
 			}); err != nil {
 				bus <- BaseProcessEvent{
@@ -342,6 +342,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			}
 			//TODO:镜像已更新设置
 		}
+		p.ImagePulled = true
 		bus <- BaseProcessEvent{
 			p:   podProc,
 			cp:  p,
@@ -355,7 +356,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 				cp:  p,
 				msg: fmt.Sprintf("start ImageUnzipped %s to workdir %s", p.Container.Image, p.Workdir),
 			}
-			if err := p.im.decompressionImage(ctx, p.Container.Image, p.Workdir); err != nil {
+			if err := p.im.UnzipImage(ctx, p.Container.Image, p.Workdir); err != nil {
 				bus <- BaseProcessEvent{
 					p:   podProc,
 					err: err,
@@ -365,6 +366,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 				return err
 			}
 		}
+		p.ImageUnzipped = true
 		bus <- BaseProcessEvent{
 			p:   podProc,
 			cp:  p,
@@ -373,39 +375,50 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 		//TODO:获取configmap和secret
 		getConfigMaps(podProc.Pod)
 		getSecrets(podProc.Pod)
-		fmt.Println("运行进程", p.Container.Command)
+		fmt.Println("运行进程", p.Container.Command, "args:", p.Container.Args)
 		if p.Pid == 0 && !p.PidDead {
 			//TODO:启动进程,设置环境变量
-			cmd := exec.Command(strings.Join(p.Container.Command, " "), p.Container.Args...)
-			cmd.Dir = filepath.Join(p.Workdir, p.Container.WorkingDir)
+			args := append(p.Container.Command, p.Container.Args...)
+			fmt.Println("=========================,run", "/bin/sh -c", strings.Join(args, " "))
+			cmd := exec.Command("/bin/sh", "-c", strings.Join(args, " "))
+			containerWorkDir := containerWorkDir(p.Workdir)
+			cmd.Dir = filepath.Join(containerWorkDir, p.Container.WorkingDir)
 			cmd.Stdin = strings.NewReader("")
-			//TODO:设置输出
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			err := cmd.Start()
+			file, err := os.OpenFile(filepath.Join(containerWorkDir, "STDOUT"), os.O_CREATE|os.O_APPEND, os.ModePerm)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			cmd.Stdout = file
+			cmd.Stderr = file
+			err = cmd.Start()
 			if err != nil {
 				bus <- BaseProcessEvent{
 					p:   podProc,
 					err: err,
 					cp:  p,
-					msg: fmt.Sprintf("start cmd error image:%s,workdir:%s,cmd:%s,args:%v", p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
+					msg: fmt.Sprintf("start cmd error image:%s,workdir:%s,cmd:%s,args:%v,err:%v", p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args, err),
 				}
 				return err
-			}
-
-			bus <- ContainerProcessRun{
-				ProcessEvent: BaseProcessEvent{
-					p:   podProc,
-					cp:  p,
-					msg: fmt.Sprintf("start cmd with Pid %v image:%s,workdir:%s,cmd:%s,args:%v", cmd.Process.Pid, p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
-				},
-				pid:   cmd.Process.Pid,
-				index: index,
+			} else {
+				p.Pid = cmd.Process.Pid
+				bus <- ContainerProcessRun{
+					ProcessEvent: BaseProcessEvent{
+						p:   podProc,
+						cp:  p,
+						msg: fmt.Sprintf("start cmd with Pid %v image:%s,workdir:%s,cmd:%s,args:%v", cmd.Process.Pid, p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
+					},
+					pid:   cmd.Process.Pid,
+					index: index,
+				}
+				go cmd.Wait()
 			}
 		}
 		startHealthCheck(ctx, p)
 		//等待结束,并发送进程结束事件
-		waitProcessDead(ctx, p)
+		err := waitProcessDead(ctx, p)
+
+		p.PidDead = true
 		bus <- ContainerProcessFinish{
 			ProcessEvent: BaseProcessEvent{
 				p:   podProc,
@@ -415,7 +428,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			index: index,
 		}
 		fmt.Println("运行进程完成", p.Container.Command)
-		return nil
+		return err
 	}
 	if p.Sync {
 		fmt.Println("================启动ContainerProcess,同步")
@@ -427,6 +440,16 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 	return nil
 }
 
+func (p *ContainerProcess) needPullImage() bool {
+	return !p.ImagePulled || p.Container.ImagePullPolicy == corev1.PullAlways || ImageLatest(p.Container.Image)
+}
+
+const ImageLatestSuffix = ":LATEST"
+
+func ImageLatest(image string) bool {
+	return strings.HasSuffix(strings.ToTitle(image), ImageLatestSuffix)
+}
+
 func (p *ContainerProcess) stop(ctx context.Context) error {
 	proc, err := process.NewProcess(int32(p.Pid))
 	if err != nil {
@@ -436,23 +459,18 @@ func (p *ContainerProcess) stop(ctx context.Context) error {
 	return proc.KillWithContext(ctx)
 }
 
-func waitProcessDead(ctx context.Context, p *ContainerProcess) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			exists, err := process.PidExists(int32(p.Pid))
-			if err != nil {
-				panic(err)
-			}
-			if !exists {
-				return
-			}
-		}
+func waitProcessDead(ctx context.Context, p *ContainerProcess) error {
+	proc, err := os.FindProcess(p.Pid)
+	if err != nil {
+		return err
 	}
+	wait, err := proc.Wait()
+	if err != nil {
+		return err
+	}
+	//wait.
+	fmt.Println("进程退出,", wait)
+	return nil
 }
 
 //TODO:健康检查
@@ -490,12 +508,17 @@ func NewProcess(pod *corev1.Pod, c corev1.Container, workdir string, im *ImageMa
 }
 
 func getProcessWorkDir(workdir string, pod *corev1.Pod) (string, error) {
-	join := filepath.Join(workdir, pod.Namespace, pod.Name)
-	s, err := filenamify.Filenamify(join, filenamify.Options{Replacement: "-"})
+	ns, err := filenamify.Filenamify(pod.Namespace, filenamify.Options{Replacement: "-"})
 	if err != nil {
 		return "", err
 	}
-	return s, nil
+	name, err := filenamify.Filenamify(pod.Name, filenamify.Options{Replacement: "-"})
+	if err != nil {
+		return "", err
+	}
+
+	join := filepath.Join(workdir, ns, name)
+	return join, nil
 }
 
 func getContainerProcessWorkDir(workdir string, pod *corev1.Pod, c corev1.Container) (string, error) {
@@ -504,12 +527,11 @@ func getContainerProcessWorkDir(workdir string, pod *corev1.Pod, c corev1.Contai
 		return "", err
 	}
 
-	join := filepath.Join(dir, c.Name)
-	s, err := filenamify.Filenamify(join, filenamify.Options{Replacement: "-"})
+	s, err := filenamify.Filenamify(c.Name, filenamify.Options{Replacement: "-"})
 	if err != nil {
 		return "", err
 	}
-	return s, nil
+	return filepath.Join(dir, s), nil
 }
 
 func dockerImageName(image string) string {

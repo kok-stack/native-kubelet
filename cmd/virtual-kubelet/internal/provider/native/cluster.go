@@ -22,9 +22,10 @@ const (
 	nameKey          = "name"
 	containerNameKey = "containerName"
 	nodeNameKey      = "nodeName"
-	DbPath           = "data"
-	ImagePath        = "images"
-	ContainerPath    = "container"
+
+	DbPath        = "data"
+	ImagePath     = "images"
+	ContainerPath = "containers"
 )
 
 type config struct {
@@ -248,7 +249,7 @@ func (p *Provider) start(ctx context.Context) error {
 	}()
 
 	p.db = db
-	p.imageManager = NewImageManager(filepath.Join(p.config.WorkDir, ImagePath), db)
+	p.imageManager = NewImageManager(filepath.Join(p.config.WorkDir, ImagePath), db, p.config.MaxTimeout)
 	record := p.initConfig.ResourceManager.GetRecord(ctx, "", "ProcessManager")
 	p.processManager = NewProcessManager(filepath.Join(p.config.WorkDir, ContainerPath), db, p.imageManager, record)
 	p.podHandler = &PodEventHandler{

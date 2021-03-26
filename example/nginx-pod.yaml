@@ -6,6 +6,8 @@ spec:
   containers:
   - image: ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1
     imagePullPolicy: Always
+    command:
+      - "curl www.baidu.com"
     name: nginx
     ports:
     - containerPort: 80

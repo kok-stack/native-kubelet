@@ -233,4 +233,6 @@ func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {
 	status.PodIPs = []v1.PodIP{{IP: p.HostIp}}
 	status.StartTime = &metav1.Time{Time: event.t}
 	status.QOSClass = v1.PodQOSGuaranteed
+	status.InitContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.InitContainers))
+	status.ContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.Containers))
 }
