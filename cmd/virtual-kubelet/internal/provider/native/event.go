@@ -1,6 +1,9 @@
 package native
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 type ProcessEvent interface {
 	getPodProcess() *PodProcess
@@ -54,6 +57,7 @@ type ContainerProcessFinish struct {
 	ProcessEvent
 	pid   int
 	index int
+	state *os.ProcessState
 }
 
 type ContainerProcessNext struct {

@@ -140,7 +140,7 @@ check:
 
 	err = deleteExistImage(imageDir)
 
-	pulling.f, err = os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s", pullLogPrefix, logName)), os.O_CREATE, 0755)
+	pulling.f, err = os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s", pullLogPrefix, logName)), os.O_CREATE|os.O_RDWR, 0755)
 	if err != nil {
 		return err
 	}

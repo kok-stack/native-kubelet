@@ -80,7 +80,6 @@ func (m *ProcessManager) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case event := <-events:
-				fmt.Println("ProcessManager收到消息====================")
 				m.recordEvent(event)
 
 				m.Put(event.getPodProcess())
@@ -384,11 +383,14 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			containerWorkDir := containerWorkDir(p.Workdir)
 			cmd.Dir = filepath.Join(containerWorkDir, p.Container.WorkingDir)
 			cmd.Stdin = strings.NewReader("")
-			file, err := os.OpenFile(filepath.Join(containerWorkDir, "STDOUT"), os.O_CREATE|os.O_APPEND, os.ModePerm)
+			file, err := os.OpenFile(filepath.Join(containerWorkDir, "STDOUT"), os.O_CREATE|os.O_APPEND|os.O_RDWR, os.ModePerm)
 			if err != nil {
 				return err
 			}
-			defer file.Close()
+			defer func() {
+				file.Sync()
+				file.Close()
+			}()
 			cmd.Stdout = file
 			cmd.Stderr = file
 			err = cmd.Start()
@@ -416,7 +418,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 		}
 		startHealthCheck(ctx, p)
 		//等待结束,并发送进程结束事件
-		err := waitProcessDead(ctx, p)
+		state, err := waitProcessDead(ctx, p)
 
 		p.PidDead = true
 		bus <- ContainerProcessFinish{
@@ -425,7 +427,9 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 				cp:  p,
 				msg: fmt.Sprintf("run cmd end image:%s", p.Container.Image),
 			},
+			pid:   p.Pid,
 			index: index,
+			state: state,
 		}
 		fmt.Println("运行进程完成", p.Container.Command)
 		return err
@@ -459,18 +463,16 @@ func (p *ContainerProcess) stop(ctx context.Context) error {
 	return proc.KillWithContext(ctx)
 }
 
-func waitProcessDead(ctx context.Context, p *ContainerProcess) error {
+func waitProcessDead(ctx context.Context, p *ContainerProcess) (*os.ProcessState, error) {
 	proc, err := os.FindProcess(p.Pid)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	wait, err := proc.Wait()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	//wait.
-	fmt.Println("进程退出,", wait)
-	return nil
+	return wait, nil
 }
 
 //TODO:健康检查

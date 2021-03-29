@@ -2,6 +2,7 @@ package native
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/kok-stack/native-kubelet/trace"
 	v1 "k8s.io/api/core/v1"
@@ -102,7 +103,6 @@ func (p *PodEventHandler) start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case e := <-p.events:
-				fmt.Println("PodEventHandler收到消息====================")
 				pod := e.getPodProcess().Pod
 				switch e.(type) {
 				case PodProcessStart:
@@ -123,17 +123,29 @@ func (p *PodEventHandler) start(ctx context.Context) {
 				default:
 					fmt.Println(e)
 				}
+				Printf(fmt.Sprintf("%T 更新pod.status ", e), pod.Status)
 				p.notifyFunc(pod)
 			}
 		}
 	}()
 }
 
+func Printf(s string, status v1.PodStatus) {
+	marshal, err := json.Marshal(status)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(s, "=======================")
+	fmt.Println(string(marshal))
+	fmt.Println(s, "=======================")
+}
+
 //pod start--> [OnContainerRun-->OnError/OnFinish]-->OnNext
 func (p *PodEventHandler) OnError(event ContainerProcessError, pod *v1.Pod) {
-	status := pod.Status
+	status := &pod.Status
+	fmt.Println("===========OnError====================")
 	status.Phase = v1.PodFailed
-	t := metav1.Time{time.Now()}
+	t := metav1.Time{Time: time.Now()}
 	status.Conditions = append(status.Conditions, v1.PodCondition{
 		Type:               v1.ContainersReady,
 		Status:             v1.ConditionFalse,
@@ -145,8 +157,9 @@ func (p *PodEventHandler) OnError(event ContainerProcessError, pod *v1.Pod) {
 }
 
 func (p *PodEventHandler) OnContainerRun(event ContainerProcessRun, pod *v1.Pod) {
-	status := pod.Status
-	t := metav1.Time{time.Now()}
+	status := &pod.Status
+	fmt.Println("===========OnContainerRun====================")
+	t := metav1.Time{Time: time.Now()}
 	index := 0
 	var c v1.Container
 	initLen := len(pod.Spec.InitContainers)
@@ -154,7 +167,7 @@ func (p *PodEventHandler) OnContainerRun(event ContainerProcessRun, pod *v1.Pod)
 
 	if initLen < event.index {
 		c = pod.Spec.InitContainers[event.index]
-		status.InitContainerStatuses = append(status.InitContainerStatuses, v1.ContainerStatus{
+		status.InitContainerStatuses[event.index] = v1.ContainerStatus{
 			Name: c.Name,
 			State: v1.ContainerState{
 				Running: &v1.ContainerStateRunning{StartedAt: t},
@@ -162,17 +175,17 @@ func (p *PodEventHandler) OnContainerRun(event ContainerProcessRun, pod *v1.Pod)
 			LastTerminationState: v1.ContainerState{
 				Running: &v1.ContainerStateRunning{StartedAt: t},
 			},
-			Ready:        false,
+			Ready:        true,
 			RestartCount: 0,
 			Image:        c.Image,
 			ImageID:      c.Image,
 			ContainerID:  strconv.Itoa(event.pid),
 			Started:      &started,
-		})
+		}
 	} else {
 		index = event.index - initLen
 		c = pod.Spec.Containers[index]
-		status.ContainerStatuses = append(status.ContainerStatuses, v1.ContainerStatus{
+		status.ContainerStatuses[index] = v1.ContainerStatus{
 			Name: c.Name,
 			State: v1.ContainerState{
 				Running: &v1.ContainerStateRunning{StartedAt: t},
@@ -180,53 +193,86 @@ func (p *PodEventHandler) OnContainerRun(event ContainerProcessRun, pod *v1.Pod)
 			LastTerminationState: v1.ContainerState{
 				Running: &v1.ContainerStateRunning{StartedAt: t},
 			},
-			Ready:        false,
+			Ready:        true,
 			RestartCount: 0,
 			Image:        c.Image,
 			ImageID:      c.Image,
 			ContainerID:  strconv.Itoa(event.pid),
 			Started:      &started,
-		})
+		}
 	}
 }
 
 func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
-	status := pod.Status
+	status := &pod.Status
+	fmt.Println("===========OnFinish====================")
 	index := 0
 	initLen := len(pod.Spec.InitContainers)
 	t := metav1.Time{Time: time.Now()}
+	var state *v1.ContainerState
+	var lastTerminationState *v1.ContainerState
 
 	if initLen < event.index {
 		index = event.index
-		containerStatus := status.InitContainerStatuses[index]
-		containerStatus.State.Terminated = &v1.ContainerStateTerminated{
-			//ExitCode:    0,
-			//Signal:      0,
-			//Reason:      "",
-			//Message:     "",
-			StartedAt:   containerStatus.State.Running.StartedAt,
-			FinishedAt:  t,
-			ContainerID: strconv.Itoa(event.pid),
-		}
+		state = &status.InitContainerStatuses[index].State
+		lastTerminationState = &status.InitContainerStatuses[index].LastTerminationState
 	} else {
 		index = event.index - initLen
-		containerStatus := status.ContainerStatuses[index]
-		containerStatus.State.Terminated = &v1.ContainerStateTerminated{
-			//ExitCode:    0,
-			//Signal:      0,
-			StartedAt:   containerStatus.State.Running.StartedAt,
-			FinishedAt:  t,
-			ContainerID: strconv.Itoa(event.pid),
-		}
+		state = &status.ContainerStatuses[index].State
+		lastTerminationState = &status.ContainerStatuses[index].LastTerminationState
 	}
+	c := &v1.ContainerStateTerminated{
+		ExitCode: int32(event.state.ExitCode()),
+		//Signal:      0,
+		//Reason:      "",
+		Message:     event.getMsg(),
+		StartedAt:   state.Running.StartedAt,
+		FinishedAt:  t,
+		ContainerID: strconv.Itoa(event.pid),
+	}
+	state.Terminated = c
+	lastTerminationState.Terminated = c
+
+	setPhase(pod, event.index)
 }
 
 func (p *PodEventHandler) OnNext(event ContainerProcessNext, pod *v1.Pod) {
-	fmt.Println(event, pod)
+	fmt.Println("===========OnNext====================")
+
+	setPhase(pod, event.index)
+}
+
+/**
+计算容器状态
+*/
+func setPhase(pod *v1.Pod, index int) {
+	status := &pod.Status
+	//if index == (len(pod.Status.InitContainerStatuses) + len(pod.Status.ContainerStatuses)) {
+	//	return
+	//}
+	for _, s := range pod.Status.InitContainerStatuses {
+		if s.LastTerminationState.Terminated == nil {
+			continue
+		}
+		if s.LastTerminationState.Terminated.ExitCode != 0 {
+			status.Phase = v1.PodFailed
+			return
+		}
+	}
+	for _, s := range pod.Status.ContainerStatuses {
+		if s.LastTerminationState.Terminated == nil {
+			continue
+		}
+		if s.LastTerminationState.Terminated.ExitCode != 0 {
+			status.Phase = v1.PodFailed
+			return
+		}
+	}
+	status.Phase = v1.PodSucceeded
 }
 
 func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {
-	status := pod.Status
+	status := v1.PodStatus{}
 	status.Phase = v1.PodRunning
 	status.HostIP = p.HostIp
 	status.PodIP = p.HostIp
@@ -235,4 +281,5 @@ func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {
 	status.QOSClass = v1.PodQOSGuaranteed
 	status.InitContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.InitContainers))
 	status.ContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.Containers))
+	pod.Status = status
 }
