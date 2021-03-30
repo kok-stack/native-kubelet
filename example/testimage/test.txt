@@ -1,0 +1,6 @@
+test
+
+docker build -t ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1 .
+docker push ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1
+
+skopeo copy docker://ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1 dir:/tmp/oci-test/
