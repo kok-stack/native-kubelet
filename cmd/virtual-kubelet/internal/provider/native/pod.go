@@ -233,23 +233,22 @@ func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
 	state.Terminated = c
 	lastTerminationState.Terminated = c
 
-	setPhase(pod, event.index)
+	setPhase(pod, event.state.ExitCode())
 }
 
 func (p *PodEventHandler) OnNext(event ContainerProcessNext, pod *v1.Pod) {
 	fmt.Println("===========OnNext====================")
-
-	setPhase(pod, event.index)
 }
 
 /**
 计算容器状态
 */
-func setPhase(pod *v1.Pod, index int) {
+func setPhase(pod *v1.Pod, exitCode int) {
 	status := &pod.Status
-	//if index == (len(pod.Status.InitContainerStatuses) + len(pod.Status.ContainerStatuses)) {
-	//	return
-	//}
+	if exitCode != 0 {
+		status.Phase = v1.PodFailed
+		return
+	}
 	for _, s := range pod.Status.InitContainerStatuses {
 		if s.LastTerminationState.Terminated == nil {
 			continue

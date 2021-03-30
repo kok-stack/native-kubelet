@@ -60,8 +60,8 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	log.G(ctx).Info("开始创建pod")
 
 	//namespace := pod.Namespace
-	//secrets := getSecrets(pod)
-	//configMaps := getConfigMaps(pod)
+	//secrets := downloadSecrets(pod)
+	//configMaps := downloadConfigMaps(pod)
 	//timeCtx, cancelFunc := context.WithTimeout(ctx, time.Second*10)
 	//defer cancelFunc()
 	//if err2 := wait.PollImmediateUntil(time.Microsecond*100, func() (done bool, err error) {
@@ -251,7 +251,8 @@ func (p *Provider) start(ctx context.Context) error {
 	p.db = db
 	p.imageManager = NewImageManager(filepath.Join(p.config.WorkDir, ImagePath), db, p.config.MaxTimeout)
 	record := p.initConfig.ResourceManager.GetRecord(ctx, "", "ProcessManager")
-	p.processManager = NewProcessManager(filepath.Join(p.config.WorkDir, ContainerPath), db, p.imageManager, record)
+	p.processManager = NewProcessManager(filepath.Join(p.config.WorkDir, ContainerPath), db, p.imageManager, record,
+		p.initConfig.InternalIP, p.initConfig.ResourceManager)
 	p.podHandler = &PodEventHandler{
 		HostIp: p.initConfig.InternalIP,
 		events: make(chan ProcessEvent),

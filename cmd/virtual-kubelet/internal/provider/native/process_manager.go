@@ -5,15 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/flytam/filenamify"
+	"github.com/kok-stack/native-kubelet/internal/manager"
 	"github.com/prologic/bitcask"
 	"github.com/shirou/gopsutil/process"
+	"io/ioutil"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/kubernetes/pkg/fieldpath"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -22,10 +27,12 @@ type ProcessStore interface {
 }
 
 type ProcessManager struct {
-	workdir   string
-	processDb *bitcask.Bitcask
-	im        *ImageManager
-	record    record.EventRecorder
+	workdir         string
+	processDb       *bitcask.Bitcask
+	im              *ImageManager
+	record          record.EventRecorder
+	nodeIp          string
+	resourceManager *manager.ResourceManager
 }
 
 func (m *ProcessManager) Put(store ProcessStore) error {
@@ -46,8 +53,8 @@ func (m *ProcessManager) Delete(store ProcessStore) error {
 
 const PodPrefix = "pod://"
 
-func NewProcessManager(workdir string, processDb *bitcask.Bitcask, im *ImageManager, record record.EventRecorder) *ProcessManager {
-	return &ProcessManager{workdir: workdir, processDb: processDb, im: im, record: record}
+func NewProcessManager(workdir string, processDb *bitcask.Bitcask, im *ImageManager, record record.EventRecorder, nodeIp string, manager *manager.ResourceManager) *ProcessManager {
+	return &ProcessManager{workdir: workdir, processDb: processDb, im: im, record: record, nodeIp: nodeIp, resourceManager: manager}
 }
 
 var bus = make(chan ProcessEvent, 0)
@@ -104,11 +111,10 @@ func (m *ProcessManager) Start(ctx context.Context) error {
 
 func (m *ProcessManager) RunPod(ctx context.Context, p *corev1.Pod) error {
 	//转换pod为进程
-	proc, err := m.convertPod2Process(ctx, p)
+	proc, err := m.convertPod2Process(p)
 	if err != nil {
 		return err
 	}
-	fmt.Println(proc, "=====================")
 	if err := m.Put(proc); err != nil {
 		return err
 	}
@@ -166,7 +172,7 @@ func (p *PodProcess) stop(ctx context.Context) error {
 	cps := p.getRuningContainerProcess()
 	//kill
 	for _, cp := range cps {
-		if err := cp.stop(ctx); err != nil {
+		if err := cp.stop(ctx, *p.Pod.Spec.TerminationGracePeriodSeconds); err != nil {
 			return err
 		}
 	}
@@ -200,10 +206,12 @@ type ContainerProcess struct {
 	RestartPolicy corev1.RestartPolicy `json:"restart_policy"`
 
 	//状态信息
-	Pid           int  `json:"pid"`
-	ImagePulled   bool `json:"image_pulled"`
-	ImageUnzipped bool `json:"image_unzipped"`
-	PidDead       bool `json:"pid_dead"`
+	Pid               int  `json:"pid"`
+	ImagePulled       bool `json:"image_pulled"`
+	ImageUnzipped     bool `json:"image_unzipped"`
+	PidDead           bool `json:"pid_dead"`
+	ConfigMapDownload bool `json:"config_map_download"`
+	SecretDownload    bool `json:"secret_download"`
 
 	im *ImageManager   `json:"-"`
 	pm *ProcessManager `json:"-"`
@@ -212,7 +220,7 @@ type ContainerProcess struct {
 /**
 将pod转换为进程
 */
-func (m *ProcessManager) convertPod2Process(ctx context.Context, p *corev1.Pod) (proc *PodProcess, err error) {
+func (m *ProcessManager) convertPod2Process(p *corev1.Pod) (proc *PodProcess, err error) {
 	dir, err := getProcessWorkDir(m.workdir, p)
 	if err != nil {
 		return nil, err
@@ -322,6 +330,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 				msg: fmt.Sprintf("start pull image %s", p.Container.Image),
 			}
 			fmt.Println("发送 pull 镜像 事件完成", dockerImageName(p.Container.Image))
+			//TODO:下载镜像时,使用ImagePullSecret
 			if err := p.im.PullImage(ctx, PullImageOpts{
 				SrcImage: dockerImageName(p.Container.Image),
 				//DockerAuthConfig:            nil,
@@ -339,7 +348,6 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 				}
 				return err
 			}
-			//TODO:镜像已更新设置
 		}
 		p.ImagePulled = true
 		bus <- BaseProcessEvent{
@@ -371,16 +379,53 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			cp:  p,
 			msg: fmt.Sprintf("ImageUnzipped %s to workdir %s finish", p.Container.Image, p.Workdir),
 		}
-		//TODO:获取configmap和secret
-		getConfigMaps(podProc.Pod)
-		getSecrets(podProc.Pod)
+		containerWorkDir := containerWorkDir(p.Workdir)
+		if !p.ConfigMapDownload {
+			if err := p.downloadConfigMaps(podProc.Pod, containerWorkDir); err != nil {
+				bus <- BaseProcessEvent{
+					p:   podProc,
+					err: err,
+					cp:  p,
+					msg: fmt.Sprintf("download configmap error image:%s,err:%v", p.Container.Image, err),
+				}
+				return err
+			} else {
+				p.ConfigMapDownload = true
+				bus <- BaseProcessEvent{
+					p:   podProc,
+					cp:  p,
+					msg: fmt.Sprintf("download configmap finish image:%s", p.Container.Image),
+				}
+			}
+		}
+		if !p.SecretDownload {
+			if err := p.downloadSecrets(podProc.Pod, containerWorkDir); err != nil {
+				bus <- BaseProcessEvent{
+					p:   podProc,
+					err: err,
+					cp:  p,
+					msg: fmt.Sprintf("download secret error image:%s,err:%v", p.Container.Image, err),
+				}
+				return err
+			} else {
+				p.SecretDownload = true
+				bus <- BaseProcessEvent{
+					p:   podProc,
+					cp:  p,
+					msg: fmt.Sprintf("download secret finish image:%s", p.Container.Image),
+				}
+			}
+		}
 		fmt.Println("运行进程", p.Container.Command, "args:", p.Container.Args)
 		if p.Pid == 0 && !p.PidDead {
-			//TODO:启动进程,设置环境变量
 			args := append(p.Container.Command, p.Container.Args...)
 			fmt.Println("=========================,run", "/bin/sh -c", strings.Join(args, " "))
 			cmd := exec.Command("/bin/sh", "-c", strings.Join(args, " "))
-			containerWorkDir := containerWorkDir(p.Workdir)
+			envs, err := p.buildContainerEnvs(podProc.Pod)
+			if err != nil {
+				return err
+			}
+			cmd.Env = envs
 			cmd.Dir = filepath.Join(containerWorkDir, p.Container.WorkingDir)
 			cmd.Stdin = strings.NewReader("")
 			file, err := os.OpenFile(filepath.Join(containerWorkDir, "STDOUT"), os.O_CREATE|os.O_APPEND|os.O_RDWR, os.ModePerm)
@@ -399,16 +444,18 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 					p:   podProc,
 					err: err,
 					cp:  p,
-					msg: fmt.Sprintf("start cmd error image:%s,workdir:%s,cmd:%s,args:%v,err:%v", p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args, err),
+					msg: fmt.Sprintf("start cmd error image:%s,workdir:%s,cmd:%s,args:%v,err:%v",
+						p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args, err),
 				}
 				return err
 			} else {
 				p.Pid = cmd.Process.Pid
 				bus <- ContainerProcessRun{
 					ProcessEvent: BaseProcessEvent{
-						p:   podProc,
-						cp:  p,
-						msg: fmt.Sprintf("start cmd with Pid %v image:%s,workdir:%s,cmd:%s,args:%v", cmd.Process.Pid, p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
+						p:  podProc,
+						cp: p,
+						msg: fmt.Sprintf("start cmd with Pid %v image:%s,workdir:%s,cmd:%s,args:%v",
+							cmd.Process.Pid, p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
 					},
 					pid:   cmd.Process.Pid,
 					index: index,
@@ -418,7 +465,7 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 		}
 		startHealthCheck(ctx, p)
 		//等待结束,并发送进程结束事件
-		state, err := waitProcessDead(ctx, p)
+		state, err := waitProcessDead(p)
 
 		p.PidDead = true
 		bus <- ContainerProcessFinish{
@@ -436,12 +483,96 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 	}
 	if p.Sync {
 		fmt.Println("================启动ContainerProcess,同步")
+		//TODO:根据容器重启策略判断是否重启
 		return f()
 	} else {
 		fmt.Println("================启动ContainerProcess,异步")
 		go f()
 	}
 	return nil
+}
+
+func (p *ContainerProcess) buildContainerEnvs(pod *corev1.Pod) ([]string, error) {
+	environ := os.Environ()
+	for _, envVar := range p.Container.Env {
+		if envVar.ValueFrom != nil {
+			val, err := p.buildEvnEntry(envVar, pod)
+			if err != nil {
+				return nil, err
+			}
+			environ = append(environ, formatEnv(envVar.Name, val))
+		} else {
+			environ = append(environ, formatEnv(envVar.Name, envVar.Value))
+		}
+	}
+	return environ, nil
+}
+
+func (p *ContainerProcess) buildEvnEntry(envVar corev1.EnvVar, pod *corev1.Pod) (string, error) {
+	if envVar.ValueFrom.FieldRef != nil {
+		path := envVar.ValueFrom.FieldRef.FieldPath
+		switch path {
+		case "status.phase",
+			"status.hostIP",
+			"status.podIP",
+			"status.podIPs",
+			"spec.host":
+			return p.pm.nodeIp, nil
+		}
+		asString, err := fieldpath.ExtractFieldPathAsString(pod, path)
+		if err != nil {
+			return "", err
+		}
+		return asString, nil
+	}
+	namespace := pod.Namespace
+	if envVar.ValueFrom.ConfigMapKeyRef != nil {
+		name := envVar.ValueFrom.ConfigMapKeyRef.Name
+		cm, err := p.pm.resourceManager.GetConfigMap(name, namespace)
+		if err != nil {
+			if errors.IsNotFound(err) && *envVar.ValueFrom.ConfigMapKeyRef.Optional {
+				return "", nil
+			}
+			return "", err
+		}
+		key := envVar.ValueFrom.ConfigMapKeyRef.Key
+		s, ok := cm.Data[key]
+		if !ok {
+			if *envVar.ValueFrom.ConfigMapKeyRef.Optional {
+				return "", nil
+			}
+			return "", fmt.Errorf("not found configmap %s key %s at namespace %s", name, key, namespace)
+		}
+		return s, nil
+	}
+	if envVar.ValueFrom.SecretKeyRef != nil {
+		name := envVar.ValueFrom.SecretKeyRef.Name
+		sec, err := p.pm.resourceManager.GetSecret(name, namespace)
+		if err != nil {
+			if errors.IsNotFound(err) && *envVar.ValueFrom.SecretKeyRef.Optional {
+				return "", nil
+			}
+			return "", err
+		}
+		key := envVar.ValueFrom.SecretKeyRef.Key
+		s, ok := sec.StringData[key]
+		if !ok {
+			if *envVar.ValueFrom.SecretKeyRef.Optional {
+				return "", nil
+			}
+			return "", fmt.Errorf("not found secret %s key %s at namespace %s", name, key, namespace)
+		}
+		return s, nil
+	}
+	if envVar.ValueFrom.ResourceFieldRef != nil {
+		//unsupport resource limit
+		return "", fmt.Errorf("unsupport ResourceFieldRef")
+	}
+	return "", nil
+}
+
+func formatEnv(name, value string) string {
+	return fmt.Sprintf("%s=%s", name, value)
 }
 
 func (p *ContainerProcess) needPullImage() bool {
@@ -454,16 +585,34 @@ func ImageLatest(image string) bool {
 	return strings.HasSuffix(strings.ToTitle(image), ImageLatestSuffix)
 }
 
-func (p *ContainerProcess) stop(ctx context.Context) error {
-	proc, err := process.NewProcess(int32(p.Pid))
+/*
+立即发送SIGTERM
+根据pod的terminationGracePeriodSeconds时间,发送kill
+*/
+func (p *ContainerProcess) stop(ctx context.Context, terminationSeconds int64) error {
+	proc, err := os.FindProcess(p.Pid)
 	if err != nil {
 		return err
 	}
-	//TODO:优雅关闭
-	return proc.KillWithContext(ctx)
+	if err = proc.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	timeout, cancelFunc := context.WithTimeout(ctx, time.Duration(terminationSeconds))
+	defer cancelFunc()
+
+	select {
+	case <-ctx.Done():
+		return proc.Kill()
+	case <-timeout.Done():
+		proc, err = os.FindProcess(p.Pid)
+		if err != nil {
+			return err
+		}
+		return proc.Kill()
+	}
 }
 
-func waitProcessDead(ctx context.Context, p *ContainerProcess) (*os.ProcessState, error) {
+func waitProcessDead(p *ContainerProcess) (*os.ProcessState, error) {
 	proc, err := os.FindProcess(p.Pid)
 	if err != nil {
 		return nil, err
@@ -540,75 +689,89 @@ func dockerImageName(image string) string {
 	return dockershim.DockerImageIDPrefix + image
 }
 
-func getConfigMaps(pod *corev1.Pod) map[string]interface{} {
-	m := make(map[string]interface{})
+func (p *ContainerProcess) downloadConfigMaps(pod *corev1.Pod, workdir string) error {
+	namespace := pod.Namespace
 	for _, volume := range pod.Spec.Volumes {
 		if volume.ConfigMap != nil {
-			m[volume.ConfigMap.Name] = nil
+			name := volume.ConfigMap.Name
+			cm, err := p.pm.resourceManager.GetConfigMap(name, namespace)
+			if err != nil {
+				if errors.IsNotFound(err) && *volume.ConfigMap.Optional {
+					continue
+				}
+				return err
+			}
+			var paths []corev1.KeyToPath
+			if len(volume.ConfigMap.Items) == 0 {
+				paths = make([]corev1.KeyToPath, len(cm.Data))
+				for k := range cm.Data {
+					paths = append(paths, corev1.KeyToPath{
+						Key:  k,
+						Path: k,
+					})
+				}
+			} else {
+				paths = volume.ConfigMap.Items
+			}
+			for _, item := range paths {
+				bytes, ok := cm.BinaryData[item.Key]
+				if !ok {
+					if *volume.Secret.Optional {
+						continue
+					} else {
+						return fmt.Errorf("not found volume configmap %s key %s in namespace %s", name, item.Key, namespace)
+					}
+				}
+				err := ioutil.WriteFile(filepath.Join(workdir, item.Path), bytes, os.ModePerm)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
-	for _, c := range pod.Spec.InitContainers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.ConfigMapKeyRef != nil {
-				m[envVar.ValueFrom.ConfigMapKeyRef.Name] = nil
-			}
-		}
-		for _, s := range c.EnvFrom {
-			if s.ConfigMapRef != nil {
-				m[s.ConfigMapRef.Name] = nil
-			}
-		}
-	}
-	for _, c := range pod.Spec.Containers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.ConfigMapKeyRef != nil {
-				m[envVar.ValueFrom.ConfigMapKeyRef.Name] = nil
-			}
-		}
-		for _, s := range c.EnvFrom {
-			if s.ConfigMapRef != nil {
-				m[s.ConfigMapRef.Name] = nil
-			}
-		}
-	}
-	return m
+
+	return nil
 }
 
-func getSecrets(pod *corev1.Pod) map[string]interface{} {
-	m := make(map[string]interface{})
+func (p *ContainerProcess) downloadSecrets(pod *corev1.Pod, workdir string) error {
+	namespace := pod.Namespace
 	for _, volume := range pod.Spec.Volumes {
 		if volume.Secret != nil {
-			m[volume.Secret.SecretName] = nil
-		}
-	}
-	for _, c := range pod.Spec.InitContainers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
-				m[envVar.ValueFrom.SecretKeyRef.Name] = nil
+			name := volume.Secret.SecretName
+			sec, err := p.pm.resourceManager.GetSecret(name, namespace)
+			if err != nil {
+				if errors.IsNotFound(err) && *volume.Secret.Optional {
+					continue
+				}
+				return err
+			}
+			var paths []corev1.KeyToPath
+			if len(volume.Secret.Items) == 0 {
+				paths = make([]corev1.KeyToPath, len(sec.Data))
+				for k := range sec.Data {
+					paths = append(paths, corev1.KeyToPath{
+						Key:  k,
+						Path: k,
+					})
+				}
+			} else {
+				paths = volume.Secret.Items
+			}
+			for _, item := range paths {
+				s, ok := sec.StringData[item.Key]
+				if !ok {
+					if *volume.Secret.Optional {
+						continue
+					} else {
+						return fmt.Errorf("not found volume secret %s key %s in namespace %s", name, item.Key, namespace)
+					}
+				}
+				err := ioutil.WriteFile(filepath.Join(workdir, item.Path), []byte(s), os.ModePerm)
+				if err != nil {
+					return err
+				}
 			}
 		}
-		for _, s := range c.EnvFrom {
-			if s.SecretRef != nil {
-				m[s.SecretRef.Name] = nil
-			}
-		}
 	}
-	for _, c := range pod.Spec.Containers {
-		for _, envVar := range c.Env {
-			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
-				m[envVar.ValueFrom.SecretKeyRef.Name] = nil
-			}
-		}
-		for _, s := range c.EnvFrom {
-			if s.SecretRef != nil {
-				m[s.SecretRef.Name] = nil
-			}
-		}
-	}
-	if pod.Spec.ImagePullSecrets != nil {
-		for _, s := range pod.Spec.ImagePullSecrets {
-			m[s.Name] = nil
-		}
-	}
-	return m
+	return nil
 }
