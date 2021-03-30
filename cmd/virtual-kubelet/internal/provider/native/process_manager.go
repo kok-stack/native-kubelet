@@ -703,7 +703,7 @@ func (p *ContainerProcess) downloadConfigMaps(pod *corev1.Pod, workdir string) e
 			}
 			var paths []corev1.KeyToPath
 			if len(volume.ConfigMap.Items) == 0 {
-				paths = make([]corev1.KeyToPath, len(cm.Data))
+				paths = make([]corev1.KeyToPath, 0, len(cm.Data))
 				for k := range cm.Data {
 					paths = append(paths, corev1.KeyToPath{
 						Key:  k,
@@ -714,15 +714,23 @@ func (p *ContainerProcess) downloadConfigMaps(pod *corev1.Pod, workdir string) e
 				paths = volume.ConfigMap.Items
 			}
 			for _, item := range paths {
-				bytes, ok := cm.BinaryData[item.Key]
+				bytes, ok := cm.Data[item.Key]
 				if !ok {
-					if *volume.Secret.Optional {
+					if volume.ConfigMap.Optional != nil && *(volume.ConfigMap.Optional) {
 						continue
 					} else {
 						return fmt.Errorf("not found volume configmap %s key %s in namespace %s", name, item.Key, namespace)
 					}
 				}
-				err := ioutil.WriteFile(filepath.Join(workdir, item.Path), bytes, os.ModePerm)
+				mountPath := item.Path
+				for _, mount := range p.Container.VolumeMounts {
+					if mount.Name == volume.Name && mount.SubPath == item.Path {
+						mountPath = mount.MountPath
+						break
+					}
+				}
+
+				err := ioutil.WriteFile(filepath.Join(workdir, mountPath), []byte(bytes), os.ModePerm)
 				if err != nil {
 					return err
 				}
@@ -747,7 +755,7 @@ func (p *ContainerProcess) downloadSecrets(pod *corev1.Pod, workdir string) erro
 			}
 			var paths []corev1.KeyToPath
 			if len(volume.Secret.Items) == 0 {
-				paths = make([]corev1.KeyToPath, len(sec.Data))
+				paths = make([]corev1.KeyToPath, 0, len(sec.Data))
 				for k := range sec.Data {
 					paths = append(paths, corev1.KeyToPath{
 						Key:  k,
@@ -758,15 +766,23 @@ func (p *ContainerProcess) downloadSecrets(pod *corev1.Pod, workdir string) erro
 				paths = volume.Secret.Items
 			}
 			for _, item := range paths {
-				s, ok := sec.StringData[item.Key]
+				s, ok := sec.Data[item.Key]
 				if !ok {
-					if *volume.Secret.Optional {
+					if volume.Secret.Optional != nil && *volume.Secret.Optional {
 						continue
 					} else {
 						return fmt.Errorf("not found volume secret %s key %s in namespace %s", name, item.Key, namespace)
 					}
 				}
-				err := ioutil.WriteFile(filepath.Join(workdir, item.Path), []byte(s), os.ModePerm)
+				mountPath := item.Path
+				for _, mount := range p.Container.VolumeMounts {
+					if mount.Name == volume.Name && mount.SubPath == item.Path {
+						mountPath = mount.MountPath
+						break
+					}
+				}
+
+				err := ioutil.WriteFile(filepath.Join(workdir, mountPath), []byte(s), os.ModePerm)
 				if err != nil {
 					return err
 				}
