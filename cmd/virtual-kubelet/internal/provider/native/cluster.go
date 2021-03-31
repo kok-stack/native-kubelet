@@ -59,27 +59,6 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	ctx = addAttributes(ctx, span, namespaceKey, pod.Namespace, nameKey, pod.Name, nodeNameKey, p.initConfig.NodeName)
 	log.G(ctx).Info("开始创建pod")
 
-	//namespace := pod.Namespace
-	//secrets := downloadSecrets(pod)
-	//configMaps := downloadConfigMaps(pod)
-	//timeCtx, cancelFunc := context.WithTimeout(ctx, time.Second*10)
-	//defer cancelFunc()
-	//if err2 := wait.PollImmediateUntil(time.Microsecond*100, func() (done bool, err error) {
-	//	for s := range secrets {
-	//		if err := p.syncSecret(ctx, s, namespace); err != nil {
-	//			return false, err
-	//		}
-	//	}
-	//	for s := range configMaps {
-	//		if err := p.syncConfigMap(ctx, s, namespace); err != nil {
-	//			return false, err
-	//		}
-	//	}
-	//	return true, nil
-	//}, timeCtx.Done()); err2 != nil {
-	//	return err2
-	//}
-
 	err := p.processManager.RunPod(ctx, pod)
 	if err != nil {
 		span.Logger().Error("创建pod错误", err.Error())
@@ -162,9 +141,12 @@ func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, con
 	ctx, span := trace.StartSpan(ctx, "Provider.GetContainerLogs")
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, namespace, nameKey, podName, nodeNameKey, p.initConfig.NodeName)
-
-	//TODO:实现,读取log
-	return nil, fmt.Errorf("unsupport GetContainerLogs")
+	reader, err := p.processManager.getPodLog(ctx, namespace, podName, containerName, opts)
+	if err != nil {
+		span.Logger().Error("获取pod日志出现错误", err.Error())
+		span.SetStatus(err)
+	}
+	return reader, nil
 }
 
 func (p *Provider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {

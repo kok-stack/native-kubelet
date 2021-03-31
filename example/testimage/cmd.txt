@@ -5,6 +5,7 @@ apt install golang-github-proglottis-gpgme-dev -y
 sudo apt-get install -y pkg-config
 apt install libdevmapper-dev -y
 
+go build main.go -o main
 docker build -t ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1 .
 docker push ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1
 

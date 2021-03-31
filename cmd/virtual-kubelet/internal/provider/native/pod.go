@@ -120,6 +120,9 @@ func (p *PodEventHandler) start(ctx context.Context) {
 				case ContainerProcessNext:
 					event := e.(ContainerProcessNext)
 					p.OnNext(event, pod)
+				case DownloadResource:
+					event := e.(DownloadResource)
+					p.OnDownloadResource(event, pod)
 				default:
 					fmt.Println(e)
 				}
@@ -281,4 +284,11 @@ func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {
 	status.InitContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.InitContainers))
 	status.ContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.Containers))
 	pod.Status = status
+}
+
+func (p *PodEventHandler) OnDownloadResource(event DownloadResource, pod *v1.Pod) {
+	status := &(pod.Status)
+	if event.err != nil {
+		status.Phase = v1.PodFailed
+	}
 }

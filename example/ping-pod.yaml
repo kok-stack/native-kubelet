@@ -15,14 +15,14 @@ data:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: nginx
+  name: ping
 spec:
   containers:
     - image: ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1
       imagePullPolicy: Always
       command:
-        - "go env"
-      name: nginx
+        - "ping www.baidu.com"
+      name: ping
       volumeMounts:
         - mountPath: "/cm"
           name: test

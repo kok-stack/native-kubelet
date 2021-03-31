@@ -118,13 +118,29 @@ func podsEqual(pod1, pod2 *corev1.Pod) bool {
 	// - `objectmeta.annotations`
 	// compare the values of the pods to see if the values actually changed
 
-	return cmp.Equal(pod1.Spec.Containers, pod2.Spec.Containers) &&
-		cmp.Equal(pod1.Spec.InitContainers, pod2.Spec.InitContainers) &&
+	return containersImageEqual(pod1.Spec.Containers, pod2.Spec.Containers) &&
+		containersImageEqual(pod1.Spec.InitContainers, pod2.Spec.InitContainers) &&
 		cmp.Equal(pod1.Spec.ActiveDeadlineSeconds, pod2.Spec.ActiveDeadlineSeconds) &&
 		cmp.Equal(pod1.Spec.Tolerations, pod2.Spec.Tolerations) &&
 		cmp.Equal(pod1.ObjectMeta.Labels, pod2.Labels) &&
 		cmp.Equal(pod1.ObjectMeta.Annotations, pod2.Annotations)
 
+}
+
+func containersImageEqual(cs1 []corev1.Container, cs2 []corev1.Container) bool {
+	for _, c1 := range cs1 {
+		exist := false
+		for _, c2 := range cs2 {
+			if c1.Image == c2.Image {
+				exist = true
+				continue
+			}
+		}
+		if !exist {
+			return false
+		}
+	}
+	return true
 }
 
 func deleteGraceTimeEqual(old, new *int64) bool {

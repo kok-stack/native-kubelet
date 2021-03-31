@@ -9,7 +9,6 @@ import (
 )
 
 func UnTar(src string, dest string) error {
-	fmt.Println("src:", src, "dest:", dest)
 	// 打开准备解压的 tar 包
 	fr, err := os.Open(src)
 	if err != nil {

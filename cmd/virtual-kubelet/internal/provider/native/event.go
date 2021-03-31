@@ -18,6 +18,10 @@ type BaseProcessEvent struct {
 	msg string
 }
 
+type DownloadResource struct {
+	BaseProcessEvent
+}
+
 func (b BaseProcessEvent) getPodProcess() *PodProcess {
 	return b.p
 }
