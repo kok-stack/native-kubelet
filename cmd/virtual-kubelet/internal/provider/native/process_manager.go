@@ -19,7 +19,6 @@ import (
 	"k8s.io/kubernetes/pkg/fieldpath"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -393,183 +392,31 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 			"p.SecretDownload":    p.SecretDownload,
 			"index":               index,
 		})
-		span.Logger().Debug("pull 镜像", imageName, p.ImagePulled)
-		//根据镜像pull策略判断是否要pull镜像
-		if p.needPullImage() {
-			span.Logger().Debug("发送 pull 镜像 事件", imageName)
-			bus <- BaseProcessEvent{
-				p:   podProc,
-				cp:  p,
-				msg: fmt.Sprintf("start pull image %s", p.Container.Image),
-			}
-			span.Logger().Debug("发送 pull 镜像 事件完成", imageName)
-			//TODO:下载镜像时,使用ImagePullSecret
-			if err := p.im.PullImage(subCtx, PullImageOpts{
-				SrcImage: imageName,
-				//DockerAuthConfig:            nil,
-				//DockerBearerRegistryToken:   "",
-				//DockerRegistryUserAgent:     "",
-				//DockerInsecureSkipTLSVerify: 0,
-				//Timeout: time.Hour,
-				//RetryCount:                  0,
-			}); err != nil {
-				bus <- BaseProcessEvent{
-					p:   podProc,
-					cp:  p,
-					err: err,
-					msg: fmt.Sprintf("image %s pull error", p.Container.Image),
-				}
-				return err
-			}
-		}
-		p.ImagePulled = true
-		bus <- BaseProcessEvent{
-			p:   podProc,
-			cp:  p,
-			msg: fmt.Sprintf("image %s pull finish", p.Container.Image),
+		if err := pull(subCtx, span, p, bus, podProc, imageName); err != nil {
+			return err
 		}
 		//解压镜像
-		span.Logger().Debug("开始解压镜像到workdir", p.Workdir)
-		if !p.ImageUnzipped {
-			bus <- BaseProcessEvent{
-				p:   podProc,
-				cp:  p,
-				msg: fmt.Sprintf("start ImageUnzipped %s to workdir %s", p.Container.Image, p.Workdir),
-			}
-			if err := p.im.UnzipImage(subCtx, p.Container.Image, p.Workdir); err != nil {
-				bus <- BaseProcessEvent{
-					p:   podProc,
-					err: err,
-					cp:  p,
-					msg: fmt.Sprintf("ImageUnzipped %s to workdir %s error %v", p.Container.Image, p.Workdir, err),
-				}
-				return err
-			}
+		if err := unzip(subCtx, span, p, bus, podProc); err != nil {
+			return err
 		}
-		p.ImageUnzipped = true
-		bus <- BaseProcessEvent{
-			p:   podProc,
-			cp:  p,
-			msg: fmt.Sprintf("ImageUnzipped %s to workdir %s finish", p.Container.Image, p.Workdir),
-		}
-		containerWorkDir := containerWorkDir(p.Workdir)
-		if !p.ConfigMapDownload {
-			if err := p.downloadConfigMaps(podProc.Pod, containerWorkDir); err != nil {
-				bus <- DownloadResource{
-					BaseProcessEvent{
-						p:   podProc,
-						err: err,
-						cp:  p,
-						msg: fmt.Sprintf("download configmap error image:%s,err:%v", p.Container.Image, err),
-					},
-				}
-				return err
-			} else {
-				p.ConfigMapDownload = true
-				bus <- DownloadResource{
-					BaseProcessEvent{
-						p:   podProc,
-						cp:  p,
-						msg: fmt.Sprintf("download configmap finish image:%s", p.Container.Image),
-					},
-				}
-			}
-		}
-		if !p.SecretDownload {
-			if err := p.downloadSecrets(podProc.Pod, containerWorkDir); err != nil {
-				bus <- DownloadResource{
-					BaseProcessEvent{
-						p:   podProc,
-						err: err,
-						cp:  p,
-						msg: fmt.Sprintf("download secret error image:%s,err:%v", p.Container.Image, err),
-					},
-				}
-				return err
-			} else {
-				p.SecretDownload = true
-				bus <- DownloadResource{
-					BaseProcessEvent{
-						p:   podProc,
-						cp:  p,
-						msg: fmt.Sprintf("download secret finish image:%s", p.Container.Image),
-					},
-				}
-			}
-		}
-		span.Logger().Debug("开始运行进程", p.Container.Command, "args:", p.Container.Args)
-		if p.Pid == 0 && !p.PidDead {
-			args := append(p.Container.Command, p.Container.Args...)
-			span.Logger().Debug("运行进程完整命令为", "/bin/sh -c", strings.Join(args, " "))
-			cmd := exec.Command("/bin/sh", "-c", strings.Join(args, " "))
-			envs, err := p.buildContainerEnvs(podProc.Pod)
-			if err != nil {
-				return err
-			}
-			cmd.Env = envs
-			fmt.Println("==========workdir", filepath.Join(containerWorkDir, p.Container.WorkingDir))
-			cmd.Dir = filepath.Join(containerWorkDir, p.Container.WorkingDir)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			cmd.Stdin = strings.NewReader("")
 
-			file, err := os.OpenFile(filepath.Join(containerWorkDir, STDOUT), os.O_CREATE|os.O_APPEND|os.O_RDWR, os.ModePerm)
+		containerWorkDir := containerWorkDir(p.Workdir)
+		if err := downloadResource(p, podProc, containerWorkDir); err != nil {
+			return err
+		}
+		runSignal := make(chan error)
+		go runProcess(span, p, podProc, containerWorkDir, index, runSignal)
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-runSignal:
 			if err != nil {
 				return err
-			}
-			defer func() {
-				file.Sync()
-				file.Close()
-			}()
-			cmd.Stdout = file
-			cmd.Stderr = file
-			err = cmd.Start()
-			if err != nil {
-				bus <- BaseProcessEvent{
-					p:   podProc,
-					err: err,
-					cp:  p,
-					msg: fmt.Sprintf("start cmd error image:%s,workdir:%s,cmd:%s,args:%v,err:%v",
-						p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args, err),
-				}
-				return err
-			} else {
-				p.Pid = cmd.Process.Pid
-				bus <- ContainerProcessRun{
-					ProcessEvent: BaseProcessEvent{
-						p:  podProc,
-						cp: p,
-						msg: fmt.Sprintf("start cmd with Pid %v image:%s,workdir:%s,cmd:%s,args:%v",
-							cmd.Process.Pid, p.Container.Image, cmd.Dir, p.Container.Command, p.Container.Args),
-					},
-					pid:   cmd.Process.Pid,
-					index: index,
-				}
-				go cmd.Wait()
 			}
 		}
 		startHealthCheck(subCtx, p)
 		//等待结束,并发送进程结束事件
-		state, err := waitProcessDead(p)
-
-		p.PidDead = true
-		var msg string
-		if state != nil {
-			msg = fmt.Sprintf("run cmd end image:%s,exitCode:%v,resion:%s", p.Container.Image, state.ExitCode(), state.String())
-		} else {
-			msg = fmt.Sprintf("run cmd end image:%s,err:%v", p.Container.Image, err)
-		}
-		bus <- ContainerProcessFinish{
-			ProcessEvent: BaseProcessEvent{
-				p:   podProc,
-				cp:  p,
-				msg: msg,
-			},
-			pid:   p.Pid,
-			index: index,
-			state: state,
-		}
-		span.Logger().Debug("运行进程完成", p.Container.Command)
-		return err
+		return processWaiter(p, podProc, index, span)
 	}
 	if p.Sync {
 		span.Logger().Debug("使用同步方式启动ContainerProcess")
@@ -712,18 +559,6 @@ func (p *ContainerProcess) stop(ctx context.Context, terminationSeconds int64) e
 	case <-timeout.Done():
 		return killer()
 	}
-}
-
-func waitProcessDead(p *ContainerProcess) (*os.ProcessState, error) {
-	proc, err := os.FindProcess(p.Pid)
-	if err != nil {
-		return nil, err
-	}
-	wait, err := proc.Wait()
-	if err != nil {
-		return nil, err
-	}
-	return wait, nil
 }
 
 //TODO:健康检查
