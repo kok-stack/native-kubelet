@@ -47,10 +47,10 @@ type Provider struct {
 }
 
 func (p *Provider) NotifyPods(ctx context.Context, f func(*v1.Pod)) {
-	_, span := trace.StartSpan(ctx, "Provider.NotifyPods")
+	subCtx, span := trace.StartSpan(ctx, "Provider.NotifyPods")
 	defer span.End()
 	p.podHandler.notifyFunc = f
-	p.podHandler.start(ctx)
+	p.podHandler.start(subCtx)
 }
 
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
@@ -239,7 +239,6 @@ func (p *Provider) start(ctx context.Context) error {
 		HostIp: p.initConfig.InternalIP,
 		events: make(chan ProcessEvent),
 	}
-	p.podHandler.start(ctx)
 	p.nodeHandler = &NodeEventHandler{
 		p:      p,
 		events: make(chan ProcessEvent),

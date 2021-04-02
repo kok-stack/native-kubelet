@@ -84,33 +84,10 @@ func AddSubscribe(ch chan ProcessEvent) {
 
 func (m *ProcessManager) Start(ctx context.Context) error {
 	//分发事件
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event := <-bus:
-				for _, v := range subscribes {
-					v <- event
-				}
-			}
-		}
-	}()
-	go func() {
-		events := make(chan ProcessEvent)
-		AddSubscribe(events)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event := <-events:
-				m.recordEvent(event)
-
-				m.Put(event.getPodProcess())
-			}
-		}
-	}()
+	m.startEventDispatcher(ctx)
+	m.startRecorder(ctx)
+	//处理restartPolicy
+	m.startContainerDaemon(ctx)
 
 	return m.processDb.Scan([]byte(PodPrefix), func(key []byte) error {
 		get, err := m.processDb.Get(key)
@@ -123,8 +100,42 @@ func (m *ProcessManager) Start(ctx context.Context) error {
 			return err
 		}
 		pp.run(ctx)
+		pp.pm = m
 		return nil
 	})
+}
+
+func (m *ProcessManager) startRecorder(ctx context.Context) {
+	go func() {
+		events := make(chan ProcessEvent)
+		AddSubscribe(events)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event := <-events:
+				m.recordEvent(event)
+
+				_ = m.Put(event.getPodProcess())
+			}
+		}
+	}()
+}
+
+func (m *ProcessManager) startEventDispatcher(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event := <-bus:
+				for _, v := range subscribes {
+					v <- event
+				}
+			}
+		}
+	}()
 }
 
 func (m *ProcessManager) RunPod(ctx context.Context, p *corev1.Pod) error {
@@ -159,28 +170,43 @@ func (p *PodProcess) Key() []byte {
 }
 
 func (p *PodProcess) run(ctx context.Context) {
-	subCtx, span := trace.StartSpan(ctx, "PodProcess.run")
-	defer span.End()
 	go func() {
+		subCtx, span := trace.StartSpan(ctx, "PodProcess.run")
+		defer span.End()
+		index := p.Index
+		lenProc := len(p.ProcessChain)
 		for {
-			span.Logger().WithField("Index", p.Index).Debug("开始 run pod")
-			if p.Index == 0 {
-				bus <- PodProcessStart{ProcessEvent: BaseProcessEvent{p: p, cp: nil}, t: time.Now()}
-				span.Logger().WithField("Index", p.Index).Debug("发送PodProcessStart事件完成")
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if index >= lenProc {
+					return
+				}
+				pod, err := p.pm.getPod(ctx, p.Namespace, p.PodName)
+				if err != nil || ers.IsNotFound(err) {
+					return
+				}
+				if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+					return
+				}
+
+				//TODO:重启需要根据 指数退避算法 来进行重启
+				span.Logger().WithField("Index", index).Debug("开始 run pod")
+				if index == 0 {
+					bus <- PodProcessStart{ProcessEvent: BaseProcessEvent{p: p, cp: nil}, t: time.Now()}
+					span.Logger().WithField("Index", index).Debug("发送PodProcessStart事件完成")
+				}
+				cp := p.ProcessChain[index]
+				span.Logger().WithField("Index", index).Debug("启动ContainerProcess")
+				if err := cp.run(subCtx, p, index); err != nil {
+					time.Sleep(time.Second * 2)
+					continue
+				} else {
+					index++
+					p.Index++
+				}
 			}
-			if p.Index >= len(p.ProcessChain) {
-				break
-			}
-			subCtx := context.WithValue(context.WithValue(subCtx, podProcessKey, p), indexKey, p.Index)
-			cp := p.ProcessChain[p.Index]
-			span.Logger().WithField("Index", p.Index).Debug("启动ContainerProcess")
-			err := cp.run(subCtx)
-			if err != nil {
-				bus <- ContainerProcessError{ProcessEvent: BaseProcessEvent{p: p, cp: cp, err: err, msg: fmt.Sprintf("run container process error,index:%v", p.Index)}, index: p.Index}
-				continue
-			}
-			p.Index++
-			bus <- ContainerProcessNext{ProcessEvent: BaseProcessEvent{p: p, cp: cp, err: err, msg: fmt.Sprintf("run container process finish, run next ,index:%v", p.Index)}, index: p.Index}
 		}
 	}()
 }
@@ -205,9 +231,6 @@ func (p *PodProcess) getRuningContainerProcess() []*ContainerProcess {
 	result := make([]*ContainerProcess, 0)
 	for i, cp := range p.ProcessChain {
 		if i > p.Index {
-			continue
-		}
-		if cp.PidDead {
 			continue
 		}
 		result = append(result, cp)
@@ -249,7 +272,6 @@ type ContainerProcess struct {
 	Pid               int  `json:"pid"`
 	ImagePulled       bool `json:"image_pulled"`
 	ImageUnzipped     bool `json:"image_unzipped"`
-	PidDead           bool `json:"pid_dead"`
 	ConfigMapDownload bool `json:"config_map_download"`
 	SecretDownload    bool `json:"secret_download"`
 
@@ -328,6 +350,7 @@ func (m *ProcessManager) getPod(ctx context.Context, namespace string, name stri
 	if err != nil {
 		return nil, err
 	}
+	p.pm = m
 	return p.Pod, nil
 }
 
@@ -373,25 +396,76 @@ func (m *ProcessManager) getPodLog(ctx context.Context, namespace string, podNam
 	return get.getLog(ctx, containerName, opts)
 }
 
-func (p *ContainerProcess) run(ctx context.Context) error {
-	ctx, span := trace.StartSpan(ctx, "ContainerProcess.run")
-	defer span.End()
-	f := func(ctx context.Context) error {
-		subCtx, span := trace.StartSpan(ctx, "ContainerProcess.run.f")
+func (m *ProcessManager) startContainerDaemon(ctx context.Context) {
+	go func() {
+		events := make(chan ProcessEvent)
+		AddSubscribe(events)
+		_, span := trace.StartSpan(ctx, "ProcessManager.startContainerDaemon")
 		defer span.End()
-		podProc := subCtx.Value(podProcessKey).(*PodProcess)
-		index := subCtx.Value(indexKey).(int)
-		imageName := dockerImageName(p.Container.Image)
-		subCtx = span.WithFields(subCtx, log.Fields{
-			"image":               imageName,
-			"p.Pid":               p.Pid,
-			"p.ImagePulled":       p.ImagePulled,
-			"p.ImageUnzipped":     p.ImageUnzipped,
-			"p.PidDead":           p.PidDead,
-			"p.ConfigMapDownload": p.ConfigMapDownload,
-			"p.SecretDownload":    p.SecretDownload,
-			"index":               index,
-		})
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event := <-events:
+				containerProcessFinish, ok := event.(ContainerProcessFinish)
+				if !ok {
+					continue
+				}
+				p := containerProcessFinish.getPodProcess()
+				cp := containerProcessFinish.getContainerProcess()
+				logger := span.Logger().WithFields(log.Fields{
+					"namespace": p.Namespace,
+					"pod":       p.PodName,
+					"container": cp.Container.Name,
+				})
+				logger.Debug("获取到containerProcessFinish事件")
+				if cp.Sync {
+					logger.Debug("init容器,跳过")
+					continue
+				}
+				pod, err := p.pm.getPod(ctx, p.Namespace, p.PodName)
+				if err != nil || ers.IsNotFound(err) || pod == nil {
+					logger.Debug("pod未获取到,跳过")
+					continue
+				}
+				if pod.ObjectMeta.DeletionTimestamp != nil && !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+					logger.Debug("pod设置了删除时间,跳过")
+					continue
+				}
+
+				switch p.Pod.Spec.RestartPolicy {
+				case corev1.RestartPolicyAlways:
+				case corev1.RestartPolicyOnFailure:
+					if containerProcessFinish.getError() == nil && (containerProcessFinish.state != nil && containerProcessFinish.state.Success()) {
+						logger.Debug("RestartPolicyOnFailure 并且退出码为0,跳过")
+						continue
+					}
+				case corev1.RestartPolicyNever:
+					logger.Debug("RestartPolicyNever,跳过")
+					continue
+				}
+				_ = cp.run(ctx, p, containerProcessFinish.index)
+				logger.Debug("已重启container")
+			}
+		}
+	}()
+}
+
+func (p *ContainerProcess) run(ctx context.Context, podProc *PodProcess, index int) error {
+	subCtx, span := trace.StartSpan(ctx, "ContainerProcess.run")
+	defer span.End()
+	imageName := dockerImageName(p.Container.Image)
+	subCtx = span.WithFields(subCtx, log.Fields{
+		"image":               imageName,
+		"p.Pid":               p.Pid,
+		"p.ImagePulled":       p.ImagePulled,
+		"p.ImageUnzipped":     p.ImageUnzipped,
+		"p.ConfigMapDownload": p.ConfigMapDownload,
+		"p.SecretDownload":    p.SecretDownload,
+		"index":               index,
+	})
+	f := func(ctx context.Context) error {
 		if err := pull(subCtx, span, p, bus, podProc, imageName); err != nil {
 			return err
 		}
@@ -416,17 +490,33 @@ func (p *ContainerProcess) run(ctx context.Context) error {
 		}
 		startHealthCheck(subCtx, p)
 		//等待结束,并发送进程结束事件
-		return processWaiter(p, podProc, index, span)
+		processWaiter(p, podProc, index, span)
+		return nil
+	}
+	startFunc := func() error {
+		if err := f(ctx); err != nil {
+			bus <- ContainerProcessFinish{
+				ProcessEvent: BaseProcessEvent{
+					p:   podProc,
+					cp:  p,
+					err: err,
+					msg: fmt.Sprintf("run container process error,index:%v", index),
+				},
+				index: index,
+				pid:   -1,
+			}
+			return err
+		}
+		return nil
 	}
 	if p.Sync {
 		span.Logger().Debug("使用同步方式启动ContainerProcess")
-		//TODO:根据容器重启策略判断是否重启
-		return f(ctx)
+		return startFunc()
 	} else {
 		span.Logger().Debug("使用异步方式启动ContainerProcess")
-		go f(ctx)
+		go startFunc()
+		return nil
 	}
-	return nil
 }
 
 func (p *ContainerProcess) buildContainerEnvs(pod *corev1.Pod) ([]string, error) {

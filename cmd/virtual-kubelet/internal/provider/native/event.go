@@ -38,17 +38,9 @@ func (b BaseProcessEvent) getMsg() string {
 	return b.msg
 }
 
-var podProcessKey = ""
-var indexKey = "index"
-
 type PodProcessStart struct {
 	ProcessEvent
 	t time.Time
-}
-
-type ContainerProcessError struct {
-	ProcessEvent
-	index int
 }
 
 type ContainerProcessRun struct {
@@ -62,9 +54,4 @@ type ContainerProcessFinish struct {
 	pid   int
 	index int
 	state *os.ProcessState
-}
-
-type ContainerProcessNext struct {
-	ProcessEvent
-	index int
 }

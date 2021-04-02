@@ -2,7 +2,6 @@ package native
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/kok-stack/native-kubelet/trace"
 	v1 "k8s.io/api/core/v1"
@@ -19,34 +18,7 @@ func (p *Provider) GetStatsSummary(ctx context.Context) (*stats.Summary, error) 
 	defer span.End()
 
 	var summary stats.Summary
-
-	//metrics, err := p.downMetricsClientSet.MetricsV1beta1().PodMetricses(v1.NamespaceAll).List(ctx, v12.ListOptions{})
-	//if err != nil {
-	//	return nil, err
-	//}
-	//var cpuAll, memoryAll uint64
-	//var t time.Time
-	//for _, metric := range metrics.Items {
-	//	podStats := convert2PodStats(&metric)
-	//	summary.Pods = append(summary.Pods, *podStats)
-	//	cpuAll += *podStats.CPU.UsageNanoCores
-	//	memoryAll += *podStats.Memory.WorkingSetBytes
-	//	if t.IsZero() {
-	//		t = podStats.StartTime.Time
-	//	}
-	//}
-	//summary.Node = stats.NodeStats{
-	//	NodeName:  p.initConfig.NodeName,
-	//	StartTime: metav1.Time{Time: t},
-	//	CPU: &stats.CPUStats{
-	//		Time:           metav1.Time{Time: t},
-	//		UsageNanoCores: &cpuAll,
-	//	},
-	//	Memory: &stats.MemoryStats{
-	//		Time:            metav1.Time{Time: t},
-	//		WorkingSetBytes: &memoryAll,
-	//	},
-	//}
+	//TODO:实现计算内存,CPU等操作
 	return &summary, nil
 }
 
@@ -96,8 +68,10 @@ type PodEventHandler struct {
 }
 
 func (p *PodEventHandler) start(ctx context.Context) {
-	AddSubscribe(p.events)
 	go func() {
+		AddSubscribe(p.events)
+		_, span := trace.StartSpan(ctx, "PodEventHandler.start")
+		defer span.End()
 		for {
 			select {
 			case <-ctx.Done():
@@ -108,102 +82,63 @@ func (p *PodEventHandler) start(ctx context.Context) {
 				case PodProcessStart:
 					event := e.(PodProcessStart)
 					p.OnPodStart(event, pod)
-				case ContainerProcessError:
-					event := e.(ContainerProcessError)
-					p.OnError(event, pod)
 				case ContainerProcessRun:
 					event := e.(ContainerProcessRun)
 					p.OnContainerRun(event, pod)
 				case ContainerProcessFinish:
 					event := e.(ContainerProcessFinish)
 					p.OnFinish(event, pod)
-				case ContainerProcessNext:
-					event := e.(ContainerProcessNext)
-					p.OnNext(event, pod)
 				case DownloadResource:
 					event := e.(DownloadResource)
 					p.OnDownloadResource(event, pod)
 				default:
-					fmt.Println(e)
 				}
-				Printf(fmt.Sprintf("%T 更新pod.status ", e), pod.Status)
 				p.notifyFunc(pod)
+				//marshal, _ := json.Marshal(pod.Status)
+				//fmt.Println("目前pod.status状态:", string(marshal))
 			}
 		}
 	}()
 }
 
-func Printf(s string, status v1.PodStatus) {
-	marshal, err := json.Marshal(status)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(s, "=======================")
-	fmt.Println(string(marshal))
-	fmt.Println(s, "=======================")
-}
-
-//pod start--> [OnContainerRun-->OnError/OnFinish]-->OnNext
-func (p *PodEventHandler) OnError(event ContainerProcessError, pod *v1.Pod) {
-	status := &pod.Status
-	fmt.Println("===========OnError====================")
-	status.Phase = v1.PodFailed
-	t := metav1.Time{Time: time.Now()}
-	status.Conditions = append(status.Conditions, v1.PodCondition{
-		Type:               v1.ContainersReady,
-		Status:             v1.ConditionFalse,
-		LastProbeTime:      t,
-		LastTransitionTime: t,
-		Reason:             "ContainerProcessError",
-		Message:            event.getMsg(),
-	})
-}
+//pod start--> [OnContainerRun-->OnFinish]-->OnNext
 
 func (p *PodEventHandler) OnContainerRun(event ContainerProcessRun, pod *v1.Pod) {
-	status := &pod.Status
+	status := pod.Status
 	fmt.Println("===========OnContainerRun====================")
 	t := metav1.Time{Time: time.Now()}
-	index := 0
-	var c v1.Container
 	initLen := len(pod.Spec.InitContainers)
 	started := true
 
 	if initLen < event.index {
-		c = pod.Spec.InitContainers[event.index]
-		status.InitContainerStatuses[event.index] = v1.ContainerStatus{
-			Name: c.Name,
-			State: v1.ContainerState{
-				Running: &v1.ContainerStateRunning{StartedAt: t},
-			},
-			LastTerminationState: v1.ContainerState{
-				Running: &v1.ContainerStateRunning{StartedAt: t},
-			},
-			Ready:        true,
-			RestartCount: 0,
-			Image:        c.Image,
-			ImageID:      c.Image,
-			ContainerID:  strconv.Itoa(event.pid),
-			Started:      &started,
+		containerStatus := status.InitContainerStatuses[event.index]
+		containerStatus.RestartCount = containerStatus.RestartCount + 1
+		containerStatus.State = v1.ContainerState{
+			Running: &v1.ContainerStateRunning{StartedAt: t},
 		}
+		containerStatus.LastTerminationState = v1.ContainerState{
+			Running: &v1.ContainerStateRunning{StartedAt: t},
+		}
+		containerStatus.Ready = true
+		containerStatus.ContainerID = strconv.Itoa(event.pid)
+		containerStatus.Started = &started
+		status.InitContainerStatuses[event.index] = containerStatus
 	} else {
-		index = event.index - initLen
-		c = pod.Spec.Containers[index]
-		status.ContainerStatuses[index] = v1.ContainerStatus{
-			Name: c.Name,
-			State: v1.ContainerState{
-				Running: &v1.ContainerStateRunning{StartedAt: t},
-			},
-			LastTerminationState: v1.ContainerState{
-				Running: &v1.ContainerStateRunning{StartedAt: t},
-			},
-			Ready:        true,
-			RestartCount: 0,
-			Image:        c.Image,
-			ImageID:      c.Image,
-			ContainerID:  strconv.Itoa(event.pid),
-			Started:      &started,
+		index := event.index - initLen
+		containerStatus := status.ContainerStatuses[index]
+		containerStatus.RestartCount = containerStatus.RestartCount + 1
+		containerStatus.State = v1.ContainerState{
+			Running: &v1.ContainerStateRunning{StartedAt: t},
 		}
+		containerStatus.LastTerminationState = v1.ContainerState{
+			Running: &v1.ContainerStateRunning{StartedAt: t},
+		}
+		containerStatus.Ready = true
+		containerStatus.ContainerID = strconv.Itoa(event.pid)
+		containerStatus.Started = &started
+		status.ContainerStatuses[event.index] = containerStatus
 	}
+	pod.Status = status
 }
 
 func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
@@ -224,8 +159,12 @@ func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
 		state = &status.ContainerStatuses[index].State
 		lastTerminationState = &status.ContainerStatuses[index].LastTerminationState
 	}
+	exitCode := -1
+	if event.state != nil {
+		exitCode = event.state.ExitCode()
+	}
 	c := &v1.ContainerStateTerminated{
-		ExitCode: int32(event.state.ExitCode()),
+		ExitCode: int32(exitCode),
 		//Signal:      0,
 		//Reason:      "",
 		Message:     event.getMsg(),
@@ -234,13 +173,10 @@ func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
 		ContainerID: strconv.Itoa(event.pid),
 	}
 	state.Terminated = c
+
 	lastTerminationState.Terminated = c
 
-	setPhase(pod, event.state.ExitCode())
-}
-
-func (p *PodEventHandler) OnNext(event ContainerProcessNext, pod *v1.Pod) {
-	fmt.Println("===========OnNext====================")
+	setPhase(pod, exitCode)
 }
 
 /**
@@ -249,7 +185,6 @@ func (p *PodEventHandler) OnNext(event ContainerProcessNext, pod *v1.Pod) {
 func setPhase(pod *v1.Pod, exitCode int) {
 	status := &pod.Status
 	if exitCode != 0 {
-		status.Phase = v1.PodFailed
 		return
 	}
 	for _, s := range pod.Status.InitContainerStatuses {
@@ -257,7 +192,6 @@ func setPhase(pod *v1.Pod, exitCode int) {
 			continue
 		}
 		if s.LastTerminationState.Terminated.ExitCode != 0 {
-			status.Phase = v1.PodFailed
 			return
 		}
 	}
@@ -266,7 +200,6 @@ func setPhase(pod *v1.Pod, exitCode int) {
 			continue
 		}
 		if s.LastTerminationState.Terminated.ExitCode != 0 {
-			status.Phase = v1.PodFailed
 			return
 		}
 	}
@@ -274,6 +207,7 @@ func setPhase(pod *v1.Pod, exitCode int) {
 }
 
 func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {
+	fmt.Println("====================OnPodStart========================")
 	status := v1.PodStatus{}
 	status.Phase = v1.PodRunning
 	status.HostIP = p.HostIp
@@ -281,8 +215,42 @@ func (p *PodEventHandler) OnPodStart(event PodProcessStart, pod *v1.Pod) {
 	status.PodIPs = []v1.PodIP{{IP: p.HostIp}}
 	status.StartTime = &metav1.Time{Time: event.t}
 	status.QOSClass = v1.PodQOSGuaranteed
-	status.InitContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.InitContainers))
-	status.ContainerStatuses = make([]v1.ContainerStatus, len(pod.Spec.Containers))
+	containerLens := len(pod.Spec.InitContainers)
+	initStatuses := make([]v1.ContainerStatus, 0, containerLens)
+	started := false
+	for i := 0; i < containerLens; i++ {
+		c := pod.Spec.InitContainers[i]
+		initStatuses = append(initStatuses, v1.ContainerStatus{
+			Name:                 c.Name,
+			State:                v1.ContainerState{},
+			LastTerminationState: v1.ContainerState{},
+			Ready:                false,
+			RestartCount:         -1,
+			Image:                c.Image,
+			ImageID:              c.Image,
+			ContainerID:          "",
+			Started:              &started,
+		})
+	}
+	status.InitContainerStatuses = initStatuses
+	containerLens = len(pod.Spec.Containers)
+	statuses := make([]v1.ContainerStatus, 0, containerLens)
+	for i := 0; i < containerLens; i++ {
+		c := pod.Spec.Containers[i]
+		statuses = append(statuses, v1.ContainerStatus{
+			Name:                 c.Name,
+			State:                v1.ContainerState{},
+			LastTerminationState: v1.ContainerState{},
+			Ready:                false,
+			RestartCount:         -1,
+			Image:                c.Image,
+			ImageID:              c.Image,
+			ContainerID:          "",
+			Started:              &started,
+		})
+	}
+	status.ContainerStatuses = statuses
+
 	pod.Status = status
 }
 

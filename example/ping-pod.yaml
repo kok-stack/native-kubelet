@@ -17,9 +17,10 @@ kind: Pod
 metadata:
   name: ping
 spec:
+  restartPolicy: Always
   containers:
     - image: ccr.ccs.tencentyun.com/k8s-test/test:oci-test-v1
-      imagePullPolicy: Always
+      imagePullPolicy: IfNotPresent
       command:
         - "ping www.baidu.com"
       name: ping

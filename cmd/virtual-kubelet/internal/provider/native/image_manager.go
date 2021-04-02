@@ -13,6 +13,7 @@ import (
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
 	"github.com/flytam/filenamify"
+	"github.com/kok-stack/native-kubelet/trace"
 	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/prologic/bitcask"
@@ -71,13 +72,17 @@ type PullImageOpts struct {
 }
 
 func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error {
+	ctx, span := trace.StartSpan(ctx, "ImageManager.PullImage")
+	defer span.End()
 	name := opts.SrcImage
 	srcRef, err := alltransports.ParseImageName(name)
 	if err != nil {
-		return fmt.Errorf("Invalid source name %s: %v", name, err)
+		span.SetStatus(err)
+		return err
 	}
 	dest, imageDir, err := imageDestDir(m.imagePath, opts.SrcImage)
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	//检查文件夹是否存在,不存在则创建
@@ -86,7 +91,8 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 	}
 	destRef, err := alltransports.ParseImageName(dest)
 	if err != nil {
-		return fmt.Errorf("Invalid destination name %s: %v", dest, err)
+		span.SetStatus(err)
+		return err
 	}
 
 	sourceCtx := &types.SystemContext{
@@ -99,10 +105,12 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 
 	policy, err := signature.DefaultPolicy(nil)
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	policyContext, err := signature.NewPolicyContext(policy)
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	if opts.Timeout == 0 {
@@ -114,23 +122,22 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 check:
 	//检查是否存在镜像
 	ok := m.imageDb.Has([]byte(name))
-	fmt.Println("检查镜像是否存在:", ok)
 	if ok {
+		span.Logger().Debug("检查到镜像存在,直接返回")
 		return nil
 	}
 	//如果不存在,检查是否正在pull
 	v, ok := m.pulling.Load(name)
-	fmt.Println("检查是否正在pull:", ok)
 	if ok {
 		//正在pull,则等到pull结束
-		fmt.Println("正在pull,则等到pull结束")
+		span.Logger().Debug("镜像正在pull,等到pull结束")
 		pull := v.(*ImagePulling)
 		<-pull.ch
-		fmt.Println("pull结束")
+		span.Logger().Debug("镜像pull结束")
 		goto check
 	}
 	//没有在pull,则执行pull
-	fmt.Println("没有在pull,则执行pull")
+	span.Logger().Debug("镜像未pull,开始执行pull")
 
 	pulling := NewImagePulling(name)
 	m.pulling.LoadOrStore(name, pulling)
@@ -142,28 +149,20 @@ check:
 
 	pulling.f, err = os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s", pullLogPrefix, logName)), os.O_CREATE|os.O_RDWR, 0755)
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	defer pulling.f.Close()
 
-	fmt.Println("====================1")
-	//err = retry.RetryIfNecessary(subCtx, func() error {
 	_, err = cc.Image(subCtx, policyContext, destRef, srcRef, &cc.Options{
 		ReportWriter:       pulling.f,
 		SourceCtx:          sourceCtx,
 		DestinationCtx:     destinationCtx,
 		ImageListSelection: cc.CopySystemImage,
 	})
-	fmt.Println("====================2", err)
-	defer func() {
-		fmt.Println("pull 完成", dest)
-	}()
-	//return err
-	//}, &retry.RetryOptions{
-	//	MaxRetry: opts.RetryCount,
-	//	Delay:    time.Microsecond * 100,
-	//})
 	if err != nil {
+		span.Logger().Error("pull镜像错误")
+		span.SetStatus(err)
 		return err
 	}
 	return m.imageDb.Put([]byte(name), []byte(dest))
@@ -194,62 +193,72 @@ func createDestDir(dir string) error {
 }
 
 func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir string) error {
+	ctx, span := trace.StartSpan(ctx, "ImageManager.UnzipImage")
+	defer span.End()
+	imageDir := getImageWorkDir(workdir)
+	ctx = span.WithFields(ctx, map[string]interface{}{
+		"image":    image,
+		"workdir":  workdir,
+		"imageDir": imageDir,
+	})
 	policy, err := signature.DefaultPolicy(nil)
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	policyContext, err := signature.NewPolicyContext(policy)
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	//解析workdir
-	imageDir := getImageWorkDir(workdir)
 	if err := createDestDir(imageDir); err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	destRef, err := directory.Transport.ParseReference(imageDir)
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	//获取image的path
 	imagePath, err := m.imageDb.Get([]byte(dockerImageName(image)))
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	//解析
 	srcRef, err := alltransports.ParseImageName(string(imagePath))
 	if err != nil {
+		span.SetStatus(err)
 		return err
 	}
 	sourceCtx := &types.SystemContext{}
 	destinationCtx := &types.SystemContext{}
 
 	//解压镜像
-	//if err := retry.RetryIfNecessary(ctx, func() error {
-	_, err = cc.Image(ctx, policyContext, destRef, srcRef, &cc.Options{
-		ReportWriter:       os.Stdout,
+	if _, err := cc.Image(ctx, policyContext, destRef, srcRef, &cc.Options{
+		ReportWriter:       nil,
 		SourceCtx:          sourceCtx,
 		DestinationCtx:     destinationCtx,
 		ImageListSelection: cc.CopySystemImage,
-	})
-	//return err
-	//}, &retry.RetryOptions{
-	//	MaxRetry: 0,
-	//	Delay:    time.Microsecond * 100,
-	//}); err != nil {
-	//	return err
-	//}
-	if err != nil {
+	}); err != nil {
+		span.SetStatus(err)
 		return err
 	}
+	span.Logger().Debug("解压tar包完成,开始解压镜像layer")
 	//解压 "层"
 	content, err := ioutil.ReadFile(manifestDir(imageDir))
 	if err != nil {
+		span.Logger().Error("解压镜像layer错误")
+		span.SetStatus(err)
 		return err
 	}
 	manifest := &v1.Manifest{}
 	err = json.Unmarshal(content, manifest)
 	if err != nil {
+		span.Logger().Error("反序列化Manifest错误")
+		span.SetStatus(err)
 		return err
 	}
 	for _, layer := range manifest.Layers {
@@ -257,10 +266,14 @@ func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir str
 		case images.MediaTypeDockerSchema2LayerGzip:
 			err = UnTar(getLayerFilePath(imageDir, layer.Digest), containerWorkDir(workdir))
 			if err != nil {
+				span.Logger().Error("用tar包解压层错误")
+				span.SetStatus(err)
 				return err
 			}
 		default:
-			return fmt.Errorf("unsupport image %s layer %s media type:%s", image, layer.Digest.Encoded(), layer.MediaType)
+			err := fmt.Errorf("unsupport image %s layer %s media type:%s", image, layer.Digest.Encoded(), layer.MediaType)
+			span.SetStatus(err)
+			return err
 		}
 	}
 
