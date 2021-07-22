@@ -8,7 +8,7 @@ import (
 	"github.com/kok-stack/native-kubelet/log"
 	"github.com/kok-stack/native-kubelet/node/api"
 	"github.com/kok-stack/native-kubelet/trace"
-	"github.com/prologic/bitcask"
+	"git.mills.io/prologic/bitcask"
 	"io"
 	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
