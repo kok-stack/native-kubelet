@@ -1201,8 +1201,8 @@ github.com/pquerna/ffjson v0.0.0-20180717144149-af8b230fcd20/go.mod h1:YARuvh7BU
 github.com/pquerna/ffjson v0.0.0-20181028064349-e517b90714f7/go.mod h1:YARuvh7BUWHNhzDq2OM5tzR2RiCcN2D7sapiKyCel/M=
 github.com/pquerna/ffjson v0.0.0-20190813045741-dac163c6c0a9 h1:kyf9snWXHvQc+yxE9imhdI8YAm4oKeZISlaAR+x73zs=
 github.com/pquerna/ffjson v0.0.0-20190813045741-dac163c6c0a9/go.mod h1:YARuvh7BUWHNhzDq2OM5tzR2RiCcN2D7sapiKyCel/M=
-github.com/prologic/bitcask v0.3.10 h1:HXygU8zCvW5gLpZ8aQECPk5iV/YQ3hcqdg/zVeES6s0=
-github.com/prologic/bitcask v0.3.10/go.mod h1:8RKJdbHLE7HFGLYSGu9slnYXSV7DMIucwVkaIYOk9GY=
+git.mills.io/prologic/bitcask v0.3.10 h1:HXygU8zCvW5gLpZ8aQECPk5iV/YQ3hcqdg/zVeES6s0=
+git.mills.io/prologic/bitcask v0.3.10/go.mod h1:8RKJdbHLE7HFGLYSGu9slnYXSV7DMIucwVkaIYOk9GY=
 github.com/prometheus/client_golang v0.0.0-20180209125602-c332b6f63c06/go.mod h1:7SWBe2y4D6OKWSNQJUaRYU/AaXPKyh/dDVn+NZz0KFw=
 github.com/prometheus/client_golang v0.9.1/go.mod h1:7SWBe2y4D6OKWSNQJUaRYU/AaXPKyh/dDVn+NZz0KFw=
 github.com/prometheus/client_golang v0.9.3-0.20190127221311-3c4408c8b829/go.mod h1:p2iRAGwDERtqlqzRXnrOVns+ignqQo//hLXqYxZYVNs=
