@@ -1,23 +1,21 @@
 module github.com/kok-stack/native-kubelet
 
-go 1.15
-
+go 1.13
 
 require (
 	contrib.go.opencensus.io/exporter/jaeger v0.1.0
 	contrib.go.opencensus.io/exporter/ocagent v0.4.12
+	git.mills.io/prologic/bitcask v1.0.0
 	github.com/bombsimon/logrusr v1.0.0
 	github.com/checkpoint-restore/go-criu/v4 v4.1.0 // indirect
 	github.com/cilium/ebpf v0.4.0 // indirect
 	github.com/containerd/console v1.0.1 // indirect
 	github.com/containerd/containerd v1.4.4
 	github.com/containers/image/v5 v5.10.5
-	github.com/coreos/go-systemd/v22 v22.3.0 // indirect
 	github.com/docker/spdystream v0.0.0-20170912183627-bc6354cbbc29 // indirect
 	github.com/elazarl/goproxy v0.0.0-20190421051319-9d40249d3c2f // indirect
 	github.com/elazarl/goproxy/ext v0.0.0-20190711103511-473e67f1d7d2 // indirect
 	github.com/flytam/filenamify v1.0.0
-	github.com/golang/protobuf v1.5.1 // indirect
 	github.com/google/go-cmp v0.5.5
 	github.com/gorilla/mux v1.7.4
 	github.com/mitchellh/go-homedir v1.1.0
@@ -26,7 +24,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.2-0.20190823105129-775207bd45b6
 	github.com/pkg/errors v0.9.1
-	git.mills.io/prologic/bitcask v0.3.10
+	//github.com/prologic/bitcask v0.3.10
 	github.com/prometheus/client_golang v1.1.0
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shirou/gopsutil v3.21.8+incompatible
@@ -37,12 +35,11 @@ require (
 	github.com/tklauser/go-sysconf v0.3.9 // indirect
 	github.com/urfave/cli v1.22.5 // indirect
 	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
-	go.opencensus.io v0.22.0
+	go.opencensus.io v0.23.0
 	go.uber.org/goleak v1.1.10
-	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
+	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20210816074244-15123e1e1f71
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0
-	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gotest.tools v2.2.0+incompatible
 	k8s.io/api v0.18.6
 	k8s.io/apimachinery v0.18.6
@@ -101,3 +98,9 @@ replace k8s.io/api => k8s.io/api v0.18.4
 replace github.com/containerd/containerd => github.com/containerd/containerd v1.0.2
 
 replace github.com/containers/image/v5 => github.com/containers/image/v5 v5.4.3
+
+replace github.com/coreos/bbolt v1.3.6 => go.etcd.io/bbolt v1.3.6
+
+replace github.com/coreos/etcd => github.com/ozonru/etcd v3.3.20-grpc1.27-origmodule+incompatible
+
+replace google.golang.org/grpc => google.golang.org/grpc v1.26.0
