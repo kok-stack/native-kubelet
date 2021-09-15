@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"git.mills.io/prologic/bitcask"
 	"github.com/flytam/filenamify"
 	"github.com/kok-stack/native-kubelet/internal/manager"
 	"github.com/kok-stack/native-kubelet/log"
 	"github.com/kok-stack/native-kubelet/node/api"
 	"github.com/kok-stack/native-kubelet/trace"
-	"git.mills.io/prologic/bitcask"
 	"github.com/shirou/gopsutil/process"
 	"io"
 	"io/ioutil"
@@ -421,16 +421,29 @@ func (m *ProcessManager) startContainerDaemon(ctx context.Context) {
 				})
 				logger.Debug("获取到containerProcessFinish事件")
 				if cp.Sync {
-					logger.Debug("init容器,跳过")
+					logger.Debug("init容器,不执行重启")
 					continue
 				}
 				pod, err := p.pm.getPod(ctx, p.Namespace, p.PodName)
 				if err != nil || ers.IsNotFound(err) || pod == nil {
-					logger.Debug("pod未获取到,跳过")
+					logger.Debug("pod未获取到,不执行重启")
 					continue
 				}
 				if pod.ObjectMeta.DeletionTimestamp != nil && !pod.ObjectMeta.DeletionTimestamp.IsZero() {
-					logger.Debug("pod设置了删除时间,跳过")
+					logger.Debug("pod设置了删除时间,不执行重启")
+					continue
+				}
+				getPod, err := p.pm.resourceManager.GetPod(p.Namespace, p.PodName)
+				if err != nil {
+					if ers.IsNotFound(err) {
+						logger.Debugf("podLister中未获取到pod %s/%s,不执行重启", p.Namespace, p.PodName)
+					} else {
+						logger.Debugf("获取pod错误,err:%v,不执行重启", err)
+					}
+					continue
+				}
+				if pod.UID != getPod.UID {
+					logger.Warnf("pod %s/%s 本地UID与apiserver不相等,本地:%s,server:%s,不执行重启", p.Namespace, p.PodName, pod.UID, getPod.UID)
 					continue
 				}
 
@@ -438,11 +451,11 @@ func (m *ProcessManager) startContainerDaemon(ctx context.Context) {
 				case corev1.RestartPolicyAlways:
 				case corev1.RestartPolicyOnFailure:
 					if containerProcessFinish.getError() == nil && (containerProcessFinish.state != nil && containerProcessFinish.state.Success()) {
-						logger.Debug("RestartPolicyOnFailure 并且退出码为0,跳过")
+						logger.Debug("RestartPolicyOnFailure 并且退出码为0,不执行重启")
 						continue
 					}
 				case corev1.RestartPolicyNever:
-					logger.Debug("RestartPolicyNever,跳过")
+					logger.Debug("RestartPolicyNever,不执行重启")
 					continue
 				}
 				_ = cp.run(ctx, p, containerProcessFinish.index)
@@ -655,7 +668,7 @@ func (p *ContainerProcess) stop(ctx context.Context, terminationSeconds int64) e
 func startHealthCheck(ctx context.Context, p *ContainerProcess) {
 	go func(ctx context.Context, p *ContainerProcess) {
 		for {
-			//在进程存在情况下,进行健康检查,进程不存在或出现错误,则跳过
+			//在进程存在情况下,进行健康检查,进程不存在或出现错误,则不执行重启
 			exists, err := process.PidExists(int32(p.Pid))
 			if err != nil {
 				panic(err)

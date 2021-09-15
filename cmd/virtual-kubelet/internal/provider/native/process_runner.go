@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/kok-stack/native-kubelet/trace"
 	"github.com/shirou/gopsutil/process"
+	"k8s.io/kubernetes/pkg/kubelet/kubeletconfig/util/log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,24 +82,28 @@ func processWaiter(p *ContainerProcess, podProc *PodProcess, index int, span tra
 	state, err := waitProcessDead(p)
 
 	var msg string
-	if state != nil {
-		msg = fmt.Sprintf("run cmd end image:%s,exitCode:%v,resion:%s", p.Container.Image, state.ExitCode(), state.String())
-	} else {
+	if err != nil {
+		//TODO:错误处理
+		log.Errorf("run cmd end image:%s,err:%v", p.Container.Image, err)
 		msg = fmt.Sprintf("run cmd end image:%s,err:%v", p.Container.Image, err)
+	} else {
+		if state != nil {
+			msg = fmt.Sprintf("run cmd end image:%s,exitCode:%v,resion:%s", p.Container.Image, state.ExitCode(), state.String())
+		}
 	}
+
 	bus <- ContainerProcessFinish{
 		ProcessEvent: BaseProcessEvent{
 			p:   podProc,
 			cp:  p,
 			msg: msg,
+			err: err,
 		},
 		pid:   p.Pid,
 		index: index,
 		state: state,
 	}
 	span.Logger().Debug("运行进程完成", p.Container.Command)
-	//TODO:错误处理
-	fmt.Println(err)
 }
 
 func waitProcessDead(p *ContainerProcess) (*os.ProcessState, error) {
