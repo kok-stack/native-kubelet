@@ -29,17 +29,18 @@ require (
 	github.com/prologic/bitcask v0.3.10
 	github.com/prometheus/client_golang v1.1.0
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
-	github.com/shirou/gopsutil v0.0.0-20180427012116-c95755e4bcd7
+	github.com/shirou/gopsutil v3.21.8+incompatible
 	github.com/sirupsen/logrus v1.8.1
 	github.com/spf13/cobra v0.0.7
 	github.com/spf13/pflag v1.0.5
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
+	github.com/tklauser/go-sysconf v0.3.9 // indirect
 	github.com/urfave/cli v1.22.5 // indirect
 	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
 	go.opencensus.io v0.22.0
 	go.uber.org/goleak v1.1.10
 	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
-	golang.org/x/sys v0.0.0-20210324051608-47abb6519492
+	golang.org/x/sys v0.0.0-20210816074244-15123e1e1f71
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gotest.tools v2.2.0+incompatible

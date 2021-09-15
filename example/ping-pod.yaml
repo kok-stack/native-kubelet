@@ -36,6 +36,9 @@ spec:
         - containerPort: 443
           name: https
   volumes:
+    - name: abcd
+      hostPath:
+        path: /xxx
     - name: test
       configMap:
         name: "test"
@@ -52,5 +55,6 @@ spec:
   tolerations:
     - key: virtual-kubelet.io/provider
       operator: Exists
+#      value: native-kubelet
 #  - key: azure.com/aci
 #    effect: NoSchedule

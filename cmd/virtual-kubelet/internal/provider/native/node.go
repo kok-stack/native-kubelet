@@ -4,10 +4,13 @@ import (
 	"context"
 	"github.com/kok-stack/native-kubelet/log"
 	"github.com/kok-stack/native-kubelet/trace"
+	"github.com/shirou/gopsutil/mem"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"math"
+	"runtime"
 )
 
 func totalResourceList(rs []corev1.ResourceList) corev1.ResourceList {
@@ -76,6 +79,17 @@ func (n *NodeEventHandler) configureNode(ctx context.Context, node *v1.Node) {
 			Port: n.p.initConfig.DaemonPort,
 		},
 	}
+	memory, err := mem.VirtualMemory()
+	if err != nil {
+		panic(err)
+	}
+	list := v1.ResourceList{
+		v1.ResourceCPU:    *resource.NewMilliQuantity(int64(runtime.NumCPU()*1000), resource.DecimalSI),
+		v1.ResourceMemory: *resource.NewQuantity(int64(memory.Available), resource.BinarySI),
+		v1.ResourcePods:   *resource.NewQuantity(math.MaxInt64, resource.DecimalSI),
+	}
+	node.Status.Allocatable = list
+	node.Status.Capacity = list
 	node.Status.NodeInfo.OSImage = n.p.initConfig.Version
 	node.Status.NodeInfo.KernelVersion = n.p.initConfig.Version
 	node.Status.NodeInfo.OperatingSystem = "linux"

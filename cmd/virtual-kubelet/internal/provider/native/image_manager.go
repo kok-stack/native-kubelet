@@ -30,6 +30,8 @@ import (
 const pullLogPrefix = "native-kubelet-pullImage-"
 const manifestFileName = "manifest.json"
 
+var insecurePolicy = []byte(`{"default":[{"type":"insecureAcceptAnything"}]}`)
+
 type ImagePulling struct {
 	imageName string
 	ch        chan interface{}
@@ -103,7 +105,7 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 	}
 	destinationCtx := &types.SystemContext{}
 
-	policy, err := signature.DefaultPolicy(nil)
+	policy, err := signature.NewPolicyFromBytes(insecurePolicy)
 	if err != nil {
 		span.SetStatus(err)
 		return err
@@ -201,7 +203,7 @@ func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir str
 		"workdir":  workdir,
 		"imageDir": imageDir,
 	})
-	policy, err := signature.DefaultPolicy(nil)
+	policy, err := signature.NewPolicyFromBytes(insecurePolicy)
 	if err != nil {
 		span.SetStatus(err)
 		return err

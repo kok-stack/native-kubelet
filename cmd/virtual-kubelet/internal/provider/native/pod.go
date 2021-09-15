@@ -163,12 +163,16 @@ func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
 	if event.state != nil {
 		exitCode = event.state.ExitCode()
 	}
+	var startAt metav1.Time
+	if state.Running != nil {
+		startAt = state.Running.StartedAt
+	}
 	c := &v1.ContainerStateTerminated{
 		ExitCode: int32(exitCode),
 		//Signal:      0,
 		//Reason:      "",
 		Message:     event.getMsg(),
-		StartedAt:   state.Running.StartedAt,
+		StartedAt:   startAt,
 		FinishedAt:  t,
 		ContainerID: strconv.Itoa(event.pid),
 	}
