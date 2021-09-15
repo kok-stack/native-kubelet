@@ -16,7 +16,7 @@ import (
 	"github.com/kok-stack/native-kubelet/trace"
 	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/prologic/bitcask"
+	"git.mills.io/prologic/bitcask"
 	"io/ioutil"
 	"math/rand"
 	"os"

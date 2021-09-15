@@ -9,7 +9,7 @@ import (
 	"github.com/kok-stack/native-kubelet/log"
 	"github.com/kok-stack/native-kubelet/node/api"
 	"github.com/kok-stack/native-kubelet/trace"
-	"github.com/prologic/bitcask"
+	"git.mills.io/prologic/bitcask"
 	"github.com/shirou/gopsutil/process"
 	"io"
 	"io/ioutil"
