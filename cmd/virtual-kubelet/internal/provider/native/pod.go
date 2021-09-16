@@ -138,6 +138,10 @@ func (p *PodEventHandler) OnContainerRun(event ContainerProcessRun, pod *v1.Pod)
 		containerStatus.Started = &started
 		status.ContainerStatuses[event.index] = containerStatus
 	}
+	if event.index+1 == len(pod.Spec.Containers)+len(pod.Spec.InitContainers) {
+		status.Conditions = append(status.Conditions, v1.PodCondition{Type: v1.PodReady,
+			Status: v1.ConditionTrue})
+	}
 	pod.Status = status
 }
 
@@ -155,6 +159,12 @@ func (p *PodEventHandler) OnFinish(event ContainerProcessFinish, pod *v1.Pod) {
 		state = &status.InitContainerStatuses[index].State
 		lastTerminationState = &status.InitContainerStatuses[index].LastTerminationState
 	} else {
+		pod.Status.Conditions = []v1.PodCondition{
+			{
+				Type:   v1.PodInitialized,
+				Status: v1.ConditionTrue,
+			},
+		}
 		index = event.index - initLen
 		state = &status.ContainerStatuses[index].State
 		lastTerminationState = &status.ContainerStatuses[index].LastTerminationState
