@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"git.mills.io/prologic/bitcask"
 	"github.com/kok-stack/native-kubelet/cmd/virtual-kubelet/internal/provider"
 	"github.com/kok-stack/native-kubelet/log"
 	"github.com/kok-stack/native-kubelet/node/api"
 	"github.com/kok-stack/native-kubelet/trace"
-	"git.mills.io/prologic/bitcask"
 	"io"
 	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
@@ -61,7 +61,7 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 
 	err := p.processManager.RunPod(ctx, pod)
 	if err != nil {
-		span.Logger().Error("创建pod错误", err.Error())
+		span.Logger().Errorf("创建pod错误,error:%v", err.Error())
 		span.SetStatus(err)
 		return err
 	}

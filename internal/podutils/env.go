@@ -17,6 +17,7 @@ package podutils
 import (
 	"context"
 	"fmt"
+	"github.com/kok-stack/native-kubelet/internal/ext"
 	"sort"
 	"strings"
 
@@ -31,7 +32,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	podshelper "k8s.io/kubernetes/pkg/apis/core/pods"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	fieldpath "k8s.io/kubernetes/pkg/fieldpath"
+	"k8s.io/kubernetes/pkg/fieldpath"
 	"k8s.io/kubernetes/pkg/kubelet/envvars"
 	"k8s.io/utils/pointer"
 )
@@ -495,12 +496,12 @@ func podFieldSelectorRuntimeValue(fs *corev1.ObjectFieldSelector, pod *corev1.Po
 		return pod.Spec.NodeName, nil
 	case "spec.serviceAccountName":
 		return pod.Spec.ServiceAccountName, nil
-		//这些值是在down集群的kubelet上设置的
-		//https://github.com/kubernetes/kubernetes/blob/55f255208a682df65f322e5d48e8e9607eb221fc/pkg/kubelet/kubelet_pods.go
+	//TODO:这些值是在down集群的kubelet上设置的
+	//https://github.com/kubernetes/kubernetes/blob/55f255208a682df65f322e5d48e8e9607eb221fc/pkg/kubelet/kubelet_pods.go
 	case "status.hostIP",
 		"status.podIP",
 		"status.podIPs":
-		return "", nil
+		return ext.GetNodeIPFromEnv(), nil
 	case "status.phase":
 		return string(pod.Status.Phase), nil
 	}

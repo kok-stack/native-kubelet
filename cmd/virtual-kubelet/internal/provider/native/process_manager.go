@@ -536,6 +536,7 @@ func (p *ContainerProcess) buildContainerEnvs(pod *corev1.Pod) ([]string, error)
 	environ := os.Environ()
 	for _, envVar := range p.Container.Env {
 		if envVar.ValueFrom != nil {
+			//在internal\podutils\env.go中处理了ValueFrom,此处不会再存在ValueFrom不为空的情况
 			val, err := p.buildEvnEntry(envVar, pod)
 			if err != nil {
 				return nil, err

@@ -16,7 +16,7 @@ package root
 
 import (
 	"context"
-	"os"
+	"github.com/kok-stack/native-kubelet/internal/ext"
 	"path"
 
 	"github.com/kok-stack/native-kubelet/cmd/virtual-kubelet/internal/provider"
@@ -117,7 +117,7 @@ func runRootCommand(ctx context.Context, s *provider.Store, c Opts) error {
 		OperatingSystem:   c.OperatingSystem,
 		ResourceManager:   rm,
 		DaemonPort:        c.ListenPort,
-		InternalIP:        os.Getenv("VKUBELET_POD_IP"),
+		InternalIP:        ext.GetNodeIPFromEnv(),
 		KubeClusterDomain: c.KubeClusterDomain,
 		Version:           c.Version,
 	}

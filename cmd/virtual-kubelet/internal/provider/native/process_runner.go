@@ -27,7 +27,7 @@ func runProcess(span trace.Span, p *ContainerProcess, podProc *PodProcess, conta
 		}
 	}
 	args := append(p.Container.Command, p.Container.Args...)
-	span.Logger().Debug("运行进程完整命令为", "/bin/sh -c", strings.Join(args, " "))
+	span.Logger().Debug("运行进程完整命令为", "/bin/sh -c ", strings.Join(args, " "))
 	cmd := exec.Command("/bin/sh", "-c", strings.Join(args, " "))
 	envs, err := p.buildContainerEnvs(podProc.Pod)
 	if err != nil {

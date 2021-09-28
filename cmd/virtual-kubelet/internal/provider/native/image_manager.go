@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"git.mills.io/prologic/bitcask"
 	"github.com/containerd/containerd/images"
 	cc "github.com/containers/image/v5/copy"
 	"github.com/containers/image/v5/directory"
@@ -16,7 +17,6 @@ import (
 	"github.com/kok-stack/native-kubelet/trace"
 	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"git.mills.io/prologic/bitcask"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -88,7 +88,7 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 		return err
 	}
 	//检查文件夹是否存在,不存在则创建
-	if err := createDestDir(filepath.Dir(imageDir)); err != nil {
+	if err := checkAndCreatePath(filepath.Dir(imageDir)); err != nil {
 		return err
 	}
 	destRef, err := alltransports.ParseImageName(dest)
@@ -180,7 +180,7 @@ func deleteExistImage(dir string) error {
 	return nil
 }
 
-func createDestDir(dir string) error {
+func checkAndCreatePath(dir string) error {
 	_, err := os.Stat(dir)
 	if err == nil {
 		return nil
@@ -214,7 +214,7 @@ func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir str
 		return err
 	}
 	//解析workdir
-	if err := createDestDir(imageDir); err != nil {
+	if err := checkAndCreatePath(imageDir); err != nil {
 		span.SetStatus(err)
 		return err
 	}
@@ -252,23 +252,30 @@ func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir str
 	//解压 "层"
 	content, err := ioutil.ReadFile(manifestDir(imageDir))
 	if err != nil {
-		span.Logger().Error("解压镜像layer错误")
+		span.Logger().Errorf("解压镜像layer错误,err:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	manifest := &v1.Manifest{}
 	err = json.Unmarshal(content, manifest)
 	if err != nil {
-		span.Logger().Error("反序列化Manifest错误")
+		span.Logger().Errorf("反序列化Manifest错误,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	for _, layer := range manifest.Layers {
 		switch layer.MediaType {
 		case images.MediaTypeDockerSchema2LayerGzip:
-			err = UnTar(getLayerFilePath(imageDir, layer.Digest), containerWorkDir(workdir))
+			dir := containerWorkDir(workdir)
+			err = checkAndCreatePath(dir)
 			if err != nil {
-				span.Logger().Error("用tar包解压层错误")
+				span.Logger().Errorf("检查并创建容器工作目录:%v,error:%v,layer:%s", dir, err, layer.Digest.Encoded())
+				span.SetStatus(err)
+				return err
+			}
+			err = UnTar(getLayerFilePath(imageDir, layer.Digest), dir)
+			if err != nil {
+				span.Logger().Errorf("用tar包解压层错误,error:%v,layer:%s", err, layer.Digest.Encoded())
 				span.SetStatus(err)
 				return err
 			}
@@ -299,9 +306,10 @@ func getImageWorkDir(workdir string) string {
 }
 
 /*
+输入
 path=/path
 imageName=docker://imagename
-
+返回
 docker-archive:/path/imagename.tar.gz
 /path/imagename.tar.gz
 */
