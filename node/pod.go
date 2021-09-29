@@ -81,6 +81,14 @@ func (pc *PodController) createOrUpdatePod(ctx context.Context, pod *corev1.Pod)
 	// Check if the pod is already known by the provider.
 	// NOTE: Some providers return a non-nil error in their GetPod implementation when the pod is not found while some other don't.
 	// Hence, we ignore the error and just act upon the pod if it is non-nil (meaning that the provider still knows about the pod).
+	//TODO:初步判断label会变, uid会变
+	// labels:
+	//      app: test-store
+	//      cluster: test
+	//      controller-revision-hash: test-store-75db568b58
+	//      module: store
+	//      statefulset.kubernetes.io/pod-name: test-store-0
+
 	if podFromProvider, _ := pc.provider.GetPod(ctx, pod.Namespace, pod.Name); podFromProvider != nil {
 		if !podsEqual(podFromProvider, podForProvider) {
 			log.G(ctx).Debugf("Pod %s exists, updating pod in provider", podFromProvider.Name)
@@ -93,6 +101,12 @@ func (pc *PodController) createOrUpdatePod(ctx context.Context, pod *corev1.Pod)
 			log.G(ctx).Info("Updated pod in provider")
 			pc.recorder.Event(pod, corev1.EventTypeNormal, podEventUpdateSuccess, "Update pod in provider successfully")
 
+			if key, err := cache.MetaNamespaceKeyFunc(pod); err != nil {
+				log.G(ctx).Error(err)
+			} else {
+				pc.knownPods.Store(key, &knownPod{})
+				//pc.syncPodsFromKubernetes.Enqueue(key)
+			}
 		}
 	} else {
 		if origErr := pc.provider.CreatePod(ctx, podForProvider); origErr != nil {
@@ -232,6 +246,10 @@ func (pc *PodController) updatePodStatus(ctx context.Context, podFromKubernetes 
 	kPod.Lock()
 
 	podFromProvider := kPod.lastPodStatusReceivedFromProvider.DeepCopy()
+	if podFromProvider.UID != podFromKubernetes.UID {
+		fmt.Printf("apiserver中UID %s 与 本地UID %s 不一致", podFromKubernetes.UID, podFromProvider.UID)
+		podFromProvider.UID = podFromKubernetes.UID
+	}
 	if cmp.Equal(podFromKubernetes.Status, podFromProvider.Status) && podFromProvider.DeletionTimestamp == nil {
 		kPod.lastPodStatusUpdateSkipped = true
 		kPod.Unlock()

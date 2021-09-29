@@ -73,26 +73,31 @@ type PullImageOpts struct {
 	//Stdout     io.Writer
 }
 
-func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error {
-	ctx, span := trace.StartSpan(ctx, "ImageManager.PullImage")
+func (m *ImageManager) PullImage(parentCtx context.Context, opts PullImageOpts) error {
+	ctx, span := trace.StartSpan(parentCtx, "ImageManager.PullImage")
 	defer span.End()
 	name := opts.SrcImage
 	srcRef, err := alltransports.ParseImageName(name)
 	if err != nil {
+		span.Logger().Errorf("解析image源出现错误,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	dest, imageDir, err := imageDestDir(m.imagePath, opts.SrcImage)
 	if err != nil {
+		span.Logger().Errorf("构建image目的地出现错误,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	//检查文件夹是否存在,不存在则创建
 	if err := checkAndCreatePath(filepath.Dir(imageDir)); err != nil {
+		span.Logger().Errorf("检查镜像目的地目录是否存在出现错误,error:%v", err)
+		span.SetStatus(err)
 		return err
 	}
 	destRef, err := alltransports.ParseImageName(dest)
 	if err != nil {
+		span.Logger().Errorf("解析image目的地错误,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
@@ -107,11 +112,13 @@ func (m *ImageManager) PullImage(ctx context.Context, opts PullImageOpts) error 
 
 	policy, err := signature.NewPolicyFromBytes(insecurePolicy)
 	if err != nil {
+		span.Logger().Errorf("获取安全策略,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	policyContext, err := signature.NewPolicyContext(policy)
 	if err != nil {
+		span.Logger().Errorf("获取安全策略上下文,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
@@ -151,6 +158,7 @@ check:
 
 	pulling.f, err = os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("%s-%s", pullLogPrefix, logName)), os.O_CREATE|os.O_RDWR, 0755)
 	if err != nil {
+		span.Logger().Errorf("打开pull日志文件,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
@@ -163,7 +171,7 @@ check:
 		ImageListSelection: cc.CopySystemImage,
 	})
 	if err != nil {
-		span.Logger().Error("pull镜像错误")
+		span.Logger().Errorf("pull镜像错误,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
@@ -195,43 +203,49 @@ func checkAndCreatePath(dir string) error {
 }
 
 func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir string) error {
-	ctx, span := trace.StartSpan(ctx, "ImageManager.UnzipImage")
-	defer span.End()
 	imageDir := getImageWorkDir(workdir)
+	ctx, span := trace.StartSpan(ctx, "ImageManager.UnzipImage")
 	ctx = span.WithFields(ctx, map[string]interface{}{
 		"image":    image,
 		"workdir":  workdir,
 		"imageDir": imageDir,
 	})
+	defer span.End()
 	policy, err := signature.NewPolicyFromBytes(insecurePolicy)
 	if err != nil {
+		span.Logger().Errorf("获取安全策略,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	policyContext, err := signature.NewPolicyContext(policy)
 	if err != nil {
+		span.Logger().Errorf("获取安全策略上下文,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	//解析workdir
 	if err := checkAndCreatePath(imageDir); err != nil {
+		span.Logger().Errorf("检查并创建workdir,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	destRef, err := directory.Transport.ParseReference(imageDir)
 	if err != nil {
+		span.Logger().Errorf("解析目的地,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	//获取image的path
 	imagePath, err := m.imageDb.Get([]byte(dockerImageName(image)))
 	if err != nil {
+		span.Logger().Errorf("获取镜像存储路径,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
 	//解析
 	srcRef, err := alltransports.ParseImageName(string(imagePath))
 	if err != nil {
+		span.Logger().Errorf("解析存储路径,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}
@@ -245,6 +259,7 @@ func (m *ImageManager) UnzipImage(ctx context.Context, image string, workdir str
 		DestinationCtx:     destinationCtx,
 		ImageListSelection: cc.CopySystemImage,
 	}); err != nil {
+		span.Logger().Errorf("解压镜像tar包,error:%v", err)
 		span.SetStatus(err)
 		return err
 	}

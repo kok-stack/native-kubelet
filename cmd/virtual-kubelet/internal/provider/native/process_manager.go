@@ -12,7 +12,6 @@ import (
 	"github.com/kok-stack/native-kubelet/trace"
 	"github.com/shirou/gopsutil/process"
 	"io"
-	"io/ioutil"
 	corev1 "k8s.io/api/core/v1"
 	ers "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/record"
@@ -169,9 +168,13 @@ func (p *PodProcess) Key() []byte {
 	return getPodKey(p.Namespace, p.PodName)
 }
 
-func (p *PodProcess) run(ctx context.Context) {
+func (p *PodProcess) run(parentCtx context.Context) {
 	go func() {
-		subCtx, span := trace.StartSpan(ctx, "PodProcess.run")
+		ctx, span := trace.StartSpan(parentCtx, "PodProcess.run")
+		ctx = span.WithFields(ctx, map[string]interface{}{
+			"namespace": p.Namespace,
+			"name":      p.PodName,
+		})
 		defer span.End()
 		index := p.Index
 		lenProc := len(p.ProcessChain)
@@ -190,17 +193,18 @@ func (p *PodProcess) run(ctx context.Context) {
 				if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
 					return
 				}
+				logger := span.Logger().WithField("index", index)
 
 				//TODO:重启需要根据 指数退避算法 来进行重启
-				span.Logger().WithField("Index", index).Debug("开始 run pod")
+				logger.Debug("开始 run pod")
 				if index == 0 {
 					bus <- PodProcessStart{ProcessEvent: BaseProcessEvent{p: p, cp: nil}, t: time.Now()}
-					span.Logger().WithField("Index", index).Debug("发送PodProcessStart事件完成")
+					logger.Debug("发送PodProcessStart事件完成")
 				}
 				cp := p.ProcessChain[index]
-				span.Logger().WithField("Index", index).Debug("启动ContainerProcess")
-				if err := cp.run(subCtx, p, index); err != nil {
-					time.Sleep(time.Second * 2)
+				logger.Debug("启动ContainerProcess")
+				if err := cp.run(ctx, p, index); err != nil {
+					time.Sleep(time.Second * 10)
 					continue
 				} else {
 					index++
@@ -465,34 +469,45 @@ func (m *ProcessManager) startContainerDaemon(ctx context.Context) {
 	}()
 }
 
+func (m *ProcessManager) UpdatePod(pod *corev1.Pod) error {
+	key := getPodKey(pod.Namespace, pod.Name)
+	get, err := m.Get(key)
+	if err != nil {
+		return err
+	}
+	get.Pod = pod
+	return m.Put(get)
+}
+
 func (p *ContainerProcess) run(ctx context.Context, podProc *PodProcess, index int) error {
+	imageName := dockerImageName(p.Container.Image)
 	subCtx, span := trace.StartSpan(ctx, "ContainerProcess.run")
 	defer span.End()
-	imageName := dockerImageName(p.Container.Image)
 	subCtx = span.WithFields(subCtx, log.Fields{
-		"image":               imageName,
-		"p.Pid":               p.Pid,
-		"p.ImagePulled":       p.ImagePulled,
-		"p.ImageUnzipped":     p.ImageUnzipped,
-		"p.ConfigMapDownload": p.ConfigMapDownload,
-		"p.SecretDownload":    p.SecretDownload,
-		"index":               index,
+		"image": imageName,
+		"p.Pid": p.Pid,
 	})
 	f := func(ctx context.Context) error {
-		if err := pull(subCtx, span, p, bus, podProc, imageName); err != nil {
+		if err := pull(subCtx, p, bus, podProc, imageName); err != nil {
+			span.Logger().Errorf("pull image error:%v", err)
+			span.SetStatus(err)
 			return err
 		}
 		//解压镜像
-		if err := unzip(subCtx, span, p, bus, podProc); err != nil {
+		if err := unzip(subCtx, p, bus, podProc); err != nil {
+			span.Logger().Errorf("image unzip error:%v", err)
+			span.SetStatus(err)
 			return err
 		}
 
 		containerWorkDir := containerWorkDir(p.Workdir)
-		if err := downloadResource(p, podProc, containerWorkDir); err != nil {
+		if err := downloadResource(subCtx, p, podProc, containerWorkDir); err != nil {
+			span.Logger().Errorf("download resource(configmap,secret,serviceaccount) error:%v", err)
+			span.SetStatus(err)
 			return err
 		}
 		runSignal := make(chan error)
-		go runProcess(span, p, podProc, containerWorkDir, index, runSignal)
+		go runProcess(subCtx, span, p, podProc, containerWorkDir, index, runSignal)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -503,7 +518,7 @@ func (p *ContainerProcess) run(ctx context.Context, podProc *PodProcess, index i
 		}
 		startHealthCheck(subCtx, p)
 		//等待结束,并发送进程结束事件
-		processWaiter(p, podProc, index, span)
+		processWaiter(subCtx, p, podProc, index)
 		return nil
 	}
 	startFunc := func() error {
@@ -728,109 +743,6 @@ func getContainerProcessWorkDir(workdir string, pod *corev1.Pod, c corev1.Contai
 
 func dockerImageName(image string) string {
 	return dockershim.DockerImageIDPrefix + image
-}
-
-func (p *ContainerProcess) downloadConfigMaps(pod *corev1.Pod, workdir string) error {
-	namespace := pod.Namespace
-	for _, volume := range pod.Spec.Volumes {
-		if volume.ConfigMap != nil {
-			name := volume.ConfigMap.Name
-			cm, err := p.pm.resourceManager.GetConfigMap(name, namespace)
-			if err != nil {
-				if ers.IsNotFound(err) && *volume.ConfigMap.Optional {
-					continue
-				}
-				return err
-			}
-			var paths []corev1.KeyToPath
-			if len(volume.ConfigMap.Items) == 0 {
-				paths = make([]corev1.KeyToPath, 0, len(cm.Data))
-				for k := range cm.Data {
-					paths = append(paths, corev1.KeyToPath{
-						Key:  k,
-						Path: k,
-					})
-				}
-			} else {
-				paths = volume.ConfigMap.Items
-			}
-			for _, item := range paths {
-				bytes, ok := cm.Data[item.Key]
-				if !ok {
-					if volume.ConfigMap.Optional != nil && *(volume.ConfigMap.Optional) {
-						continue
-					} else {
-						return fmt.Errorf("not found volume configmap %s key %s in namespace %s", name, item.Key, namespace)
-					}
-				}
-				mountPath := item.Path
-				for _, mount := range p.Container.VolumeMounts {
-					if mount.Name == volume.Name && mount.SubPath == item.Path {
-						mountPath = mount.MountPath
-						break
-					}
-				}
-
-				err := ioutil.WriteFile(filepath.Join(workdir, mountPath), []byte(bytes), os.ModePerm)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func (p *ContainerProcess) downloadSecrets(pod *corev1.Pod, workdir string) error {
-	namespace := pod.Namespace
-	for _, volume := range pod.Spec.Volumes {
-		if volume.Secret != nil {
-			name := volume.Secret.SecretName
-			sec, err := p.pm.resourceManager.GetSecret(name, namespace)
-			if err != nil {
-				if ers.IsNotFound(err) && *volume.Secret.Optional {
-					continue
-				}
-				return err
-			}
-			var paths []corev1.KeyToPath
-			if len(volume.Secret.Items) == 0 {
-				paths = make([]corev1.KeyToPath, 0, len(sec.Data))
-				for k := range sec.Data {
-					paths = append(paths, corev1.KeyToPath{
-						Key:  k,
-						Path: k,
-					})
-				}
-			} else {
-				paths = volume.Secret.Items
-			}
-			for _, item := range paths {
-				s, ok := sec.Data[item.Key]
-				if !ok {
-					if volume.Secret.Optional != nil && *volume.Secret.Optional {
-						continue
-					} else {
-						return fmt.Errorf("not found volume secret %s key %s in namespace %s", name, item.Key, namespace)
-					}
-				}
-				mountPath := item.Path
-				for _, mount := range p.Container.VolumeMounts {
-					if mount.Name == volume.Name && mount.SubPath == item.Path {
-						mountPath = mount.MountPath
-						break
-					}
-				}
-
-				err := ioutil.WriteFile(filepath.Join(workdir, mountPath), s, os.ModePerm)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }
 
 func (p *ContainerProcess) getLog(ctx context.Context, opts api.ContainerLogOpts) (io.ReadCloser, error) {

@@ -2,6 +2,13 @@ package ext
 
 import "os"
 
+var nodeIp string
+
 func GetNodeIPFromEnv() string {
-	return os.Getenv("VKUBELET_POD_IP")
+	if len(nodeIp) > 0 {
+		return nodeIp
+	} else {
+		nodeIp = os.Getenv("VKUBELET_POD_IP")
+	}
+	return nodeIp
 }

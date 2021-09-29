@@ -3,7 +3,6 @@ package native
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"git.mills.io/prologic/bitcask"
 	"github.com/kok-stack/native-kubelet/cmd/virtual-kubelet/internal/provider"
 	"github.com/kok-stack/native-kubelet/log"
@@ -73,12 +72,7 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 	ctx, span := trace.StartSpan(ctx, "Provider.UpdatePod")
 	defer span.End()
 	ctx = addAttributes(ctx, span, namespaceKey, pod.Namespace, nameKey, pod.Name, nodeNameKey, p.initConfig.NodeName)
-
-	err := fmt.Errorf("unsupport UpdatePod %s/%s", pod.Namespace, pod.Name)
-
-	span.Logger().Error("更新pod错误", err.Error())
-	span.SetStatus(err)
-	return err
+	return p.processManager.UpdatePod(pod)
 }
 
 func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
