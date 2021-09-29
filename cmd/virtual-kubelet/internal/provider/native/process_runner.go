@@ -40,6 +40,10 @@ func runProcess(ctx context.Context, span trace.Span, p *ContainerProcess, podPr
 	args := append(p.Container.Command, p.Container.Args...)
 	span.Logger().Debugf("运行进程完整命令为 /bin/sh -c %s", strings.Join(args, " "))
 	cmd := exec.Command("/bin/sh", "-c", strings.Join(args, " "))
+	//开启新的进程组
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
 	envs, err := p.buildContainerEnvs(podProc.Pod)
 	if err != nil {
 		span.Logger().Errorf("构建容器环境变量错误,error:%v", err)
